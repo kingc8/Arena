@@ -1,0 +1,134 @@
+#version 120
+
+// Bluebush 4.2 Main Fragment Shader
+
+varying vec4 Color;
+varying vec4 Tex_Fres;
+varying float Alpha;
+
+uniform float lightmix;
+
+uniform sampler2D tex0;
+uniform samplerCube env0;
+
+varying vec4 vFrag; // Vertex
+varying vec4 eFrag; // Eye
+varying vec3 nFrag; // Normal
+
+varying vec3 ReflectDir; // Cube env mapping
+
+// Fresnel
+
+vec3 vertEye = normalize( vFrag.xyz * eFrag.w - eFrag.xyz * vFrag.w );
+vec3 R = reflect( vertEye, nFrag );
+vec3 RH = normalize( R - vertEye );
+float fresnel = clamp(1.0 * pow( 1.0 + dot( vertEye, RH ), Tex_Fres.p ), 0.0f, 1.0f);
+vec4 rimcolor = vec4 ( 1.0, 1.0, 1.0, 1.0 ); // White rim color
+
+varying float distToCamera;
+varying vec4 worldPosition;
+
+varying vec4 texOffsets;
+varying float displacementMix;
+varying vec2 displacementCoords;
+
+varying float mtMix;
+varying	vec2 MtHalfExtents;
+varying vec2 midpoint;
+varying vec2 top_left;
+varying vec2 ExtentPixels;
+varying float MtZoom;
+varying vec4 vert; // Re-usable value.
+
+varying float tMix;
+varying	vec2 tHalfExtents;
+varying vec2 toffset;
+varying vec2 tmidpoint;
+varying vec2 ttop_left;
+varying vec2 tExtentPixels;
+varying float tZoom;
+
+float InQuint(float x)
+{
+	return x * x * x * x * x;
+}
+
+void main()
+{
+	// Texture and Color
+
+	vec2 Tex = vec2(Tex_Fres.s + texOffsets.x, Tex_Fres.t + texOffsets.y);
+
+	vec4 displaceValue = texture2D ( tex0, vec2( displacementCoords.s + texOffsets.z, displacementCoords.t + texOffsets.w ) );
+
+	displaceValue.r = (displaceValue.r * displacementMix) * 0.00097;
+	Tex = vec2 ( Tex.s - displaceValue.r, Tex.t - displaceValue.r);
+
+	vec4 texcolor = Color * texture2D ( tex0, Tex.st ); // 1.0 / 2048px atlas
+	float finalAlpha = texcolor.a * Alpha;
+
+	if ( texcolor.a > 0.0 ) // Only perform light above certain transparency level >= 0.6    > 0.01
+	{
+		// Multitexture integration
+		
+		float atlasPixel = 1.0f / 2048.0f; // One pixel worth in atlas 0-1 format.
+		vec2 v_px = vec2(vert.x * 0.01f, vert.y * 0.01f); // Vertex in Pixels position.
+		// Below, is the Atlas-sized midpoint + (Atlas-sized vertex_pixel * scale)
+		vec2 mtRaw = vec2 (midpoint.x + ((v_px.x * atlasPixel) * MtZoom), midpoint.y + ((v_px.y * atlasPixel) * MtZoom) ); // MX.y is zoom.
+		vec2 originRaw = vec2 ((mtRaw.x - midpoint.x), (mtRaw.y - midpoint.y));
+		vec2 wrap_ratio = vec2 ( fract ((originRaw.x * ExtentPixels.x) + 0.5f), fract ((originRaw.y * ExtentPixels.y) + 0.5f) );
+		vec2 mtCoords = vec2(top_left.x + ( wrap_ratio.x * (MtHalfExtents.x * 2.0f)), top_left.y + ( wrap_ratio.y * (MtHalfExtents.y * 2.0f)));
+		texcolor = mix ( texcolor, texture2D ( tex0, mtCoords ), mtMix);
+
+		// Auto texture integration
+		
+		vec2 tv_px = vec2(vert.x * 0.01f, vert.z * 0.01f); // Vertex in Pixels position (in X and Z this time).
+		vec2 tRaw = vec2 (toffset.x + tmidpoint.x + ((tv_px.x * atlasPixel) * tZoom), toffset.y + tmidpoint.y + ((tv_px.y * atlasPixel) * tZoom) ); // TX.y is zoom.
+		vec2 ToriginRaw = vec2 ((tRaw.x - tmidpoint.x), (tRaw.y - tmidpoint.y));
+		vec2 twrap_ratio = vec2 ( fract ((ToriginRaw.x * tExtentPixels.x) + 0.5f), fract ((ToriginRaw.y * tExtentPixels.y) + 0.5f) );
+		vec2 tCoords = vec2(ttop_left.x + ( twrap_ratio.x * (tHalfExtents.x * 2.0f)),ttop_left.y + ( twrap_ratio.y * (tHalfExtents.y * 2.0f)));
+		texcolor = mix ( texcolor, texture2D ( tex0, tCoords ), tMix);
+
+		// Cube map environment map.
+
+		vec4 envColor = vec4(textureCube(env0, ReflectDir));
+		texcolor = mix(texcolor, envColor, Tex_Fres.q ); // 0.5 is the MixRatio
+		
+		// Lighting
+
+		vec3 L = normalize(gl_LightSource[0].position.xyz - vec3(-vFrag));
+		vec3 E = normalize(vec3(-vFrag)); // we are in Eye Coordinates, so EyePos is (0,0,0)
+		vec3 R = normalize(-reflect(L,nFrag));
+
+		//calculate Ambient Term:  
+		vec4 Iamb = gl_FrontLightProduct[0].ambient;
+
+		//calculate Diffuse Term:  
+		vec4 Idiff = gl_FrontLightProduct[0].diffuse * max(dot(nFrag,L), 0.0);    
+
+		// calculate Specular Term:
+		vec4 Ispec = gl_FrontLightProduct[0].specular * pow(max(dot(R,E),0.0),0.3*gl_FrontMaterial.shininess);
+
+		// DEBUG this below was simply texcolor assignment
+
+		texcolor.a = finalAlpha;
+		vec4 texcolor_light = (texcolor * gl_FrontLightModelProduct.sceneColor) + Iamb + Idiff + Ispec;
+		texcolor_light.a = finalAlpha;
+		texcolor_light = mix( texcolor_light, rimcolor, fresnel ); // Completes Fresnel here.
+		
+		texcolor = mix(texcolor, texcolor_light, lightmix); // Turn lighting effect up and down (for GUI de-glaring)
+	}
+
+	// Spotlight lamp
+	float dist = distance(vec3(20.4, 19.4, -20.0), vec3(worldPosition.x, worldPosition.y, worldPosition.z));
+//	float fade = 0.0;	
+//	float fade =  InQuint(clamp((dist * 0.03) / 1.0f, 0.0f, 0.90f)); // 0.7
+	float fade = lightmix * (clamp((dist * 0.01) / 1.0f, 0.0f, 0.90f)); // 0.7
+	texcolor = vec4(texcolor.r - (texcolor.r * fade), texcolor.g - (texcolor.g * fade), texcolor.b - (texcolor.b * fade), texcolor.a);
+
+	// Fade pixel closer to camera (bluebush to opengl = value * 0.01;)
+	//texcolor.a = texcolor.a * clamp((distToCamera * 0.01) / 1.0f, 0.0f, 1.0f);
+
+	// write Total Color:
+	gl_FragColor = texcolor;
+}

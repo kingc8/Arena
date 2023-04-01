@@ -1,0 +1,39 @@
+#version 120
+
+// Post-processing fragment shader 1.1
+// Bloom (Second Pass)
+
+uniform sampler2D FBO2tex;
+varying vec2 texCoords;
+
+vec2 resolution = vec2(1280, 720);
+
+vec3 blur(vec3 pixel, sampler2D tex, vec2 uv, vec2 dir)
+{
+	float blur_amount = 32.1;
+    vec2 scalar = 1.0 / resolution;
+    
+    vec2 offset = vec2(pixel.rg + pixel.b) / 3.0;
+    
+    vec2 gdir = dir * 0.001 * blur_amount;
+    return textureGrad(tex, uv, gdir, gdir).rgb; // <-What is this function doing and how do we call it from version 120? 
+	
+	// SET_GRADIENTS_H ____, R0.xyxx, t0, s0  WHOLE_QUAD 
+}
+
+void main()
+{
+	vec2 tcoord = vec2(1.0f - texCoords.s, texCoords.t); // Flip the x axis.
+
+    vec2 uv = tcoord/resolution.xy;
+    vec3 col = texture2D(FBO2tex, uv).rgb;
+    
+    vec3 blurred = vec3(0.0);
+    blurred += blur(col, FBO2tex, uv, vec2(1, 0));
+    blurred += blur(col, FBO2tex, uv, vec2(-1, 0));
+    blurred += blur(col, FBO2tex, uv, vec2(0, 1));
+    blurred += blur(col, FBO2tex, uv, vec2(0, -1));
+    blurred /= 4.0;
+
+    gl_FragColor = vec4(blurred, 1.0);
+}
