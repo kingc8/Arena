@@ -254,6 +254,12 @@ Fl_Button* fragment_reset_button;
 Fl_Button* fragment_compile_button;
 Fl_Button* fragment_save_button;
 
+Fl_Hold_Browser* rail_browser;
+Fl_Float_Input* railwidth_counter;
+Fl_Float_Input* railgauge_counter;
+Fl_Float_Input* railsteps_counter;
+Fl_Button* railsave_button;
+
 coords3d minBound = { 0.0f, 0.0f, 0.0f };
 coords3d maxBound = { 0.0f, 0.0f, 0.0f };
 
@@ -2680,6 +2686,121 @@ private:
 		}
 	}
 
+	static void HUDquad( string image, point pos, point dims, coords3d color)
+	{
+		//coords3d col = { 1.0f, 1.0f, 1.0f }; // We default vertex color to "white"
+
+		ipoint ta = { 5,5 }; // Default values, in case the counter doesn't have a valid value.
+		ipoint tb = { -5,5 };
+		ipoint tc = { -5,-5 };
+		ipoint td = { 5,-5 };
+
+		int handle = gl->loadHUDimage_patch(image, { pos.x, pos.y, 1.0f}, { pos.x + dims.x, pos.y, 1.0f }, { pos.x + dims.x, pos.y + dims.y, 1.0f }, { pos.x, pos.y + dims.y, 1.0f }, color, color, color, color, ta, tb, tc, td, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f, -1.0f}, 6.0f, 0.0f, 1.0f);
+		gl->glassHUDimage(handle, 1.0f);
+	}
+
+	static void rail_cb(Fl_Widget*, void* p)
+	{
+		float railwidth_float = 1.0f;
+		float railgauge_float = 1.0f;
+		int railsteps_int = 1;
+
+		if (railwidth_counter->size() > 0)
+			railwidth_float = stof(railwidth_counter->value());
+
+		if (railgauge_counter->size() > 0)
+			railgauge_float = stof(railgauge_counter->value());
+
+		if (railsteps_counter->size() > 0)
+			railsteps_int = atoi(railsteps_counter->value());
+
+		if (rail_browser->value() > 0) // If a rail image was selected, go ahead.
+		{
+			float angleDelta = 90.0f / float(railsteps_int);
+			float angle = 90.0f; // Start angle
+
+			struct edge
+			{
+				coords3d a = { 0.0f, 0.0f, 0.0f };
+				coords3d b = { 0.0f, 0.0f, 0.0f };
+			};
+
+			vector <edge> leftRail;
+			vector <edge> rightRail;
+
+			edge le; // left edge
+			edge re; // right edge
+
+			le.a = { 0.0f, (32.0f - railgauge_float) - railwidth_float, 0.0f };
+			le.b = { 0.0f, (32.0f - railgauge_float) + railwidth_float, 0.0f };
+			re.a = { 0.0f, (32.0f + railgauge_float) - railwidth_float, 0.0f };
+			re.b = { 0.0f, (32.0f + railgauge_float) + railwidth_float, 0.0f };
+
+			point p0 = gl->cosine(le.a.y, angle);
+			point p1 = gl->cosine(le.b.y, angle);
+			edge le_temp = { {p0.x, p0.y, 0.0f}, {p1.x, p1.y, 0.0f} };
+
+			point p2 = gl->cosine(re.a.y, angle);
+			point p3 = gl->cosine(re.b.y, angle);
+			edge re_temp = { {p2.x, p2.y, 0.0f}, {p3.x, p3.y, 0.0f} };
+
+			leftRail.push_back(le_temp); // Initial position.
+			rightRail.push_back(re_temp);
+
+			angle = angle + angleDelta;
+
+			for (int i = 0; i < railsteps_int; i++) // Lay out the edges.
+			{
+				point p0 = gl->cosine(le.a.y, angle);
+				point p1 = gl->cosine(le.b.y, angle);
+				edge le_temp = { {p0.x, p0.y, 0.0f}, {p1.x, p1.y, 0.0f} };
+
+				point p2 = gl->cosine(re.a.y, angle);
+				point p3 = gl->cosine(re.b.y, angle);
+				edge re_temp = { {p2.x, p2.y, 0.0f}, {p3.x, p3.y, 0.0f} };
+
+				leftRail.push_back(le_temp);
+				rightRail.push_back(re_temp);
+
+				angle = angle + angleDelta;
+			}
+
+			coords3d col = { 1.0f, 1.0f, 1.0f }; // We default vertex color to "white"
+
+			ipoint ta = { 1,1 }; // Default values, in case the counter doesn't have a valid value.
+			ipoint tb = { -1,1 };
+			ipoint tc = { -1,-1 };
+			ipoint td = { 1,-1 };
+
+			marker_type hud_mt;
+			hud_mt.index = 0;
+			hud_mt.index_type = 3;
+			hud_mt.isStatic = true;
+			gl->resetHUDimagesto(hud_mt);
+
+			HUDquad("white0", { 0.0f,0.0f }, { 64.0f,64.0f }, {1,1,1});
+			HUDquad("white0", { 64.0f,64.0f }, { 64.0f,64.0f }, { 1,1,1 });
+
+			for (int i = 0; i < railsteps_int; i++) // Stitch the patches.
+			{
+				int handle = gl->loadHUDimage_patch(rail_browser->text(rail_browser->value()), leftRail[i].a, leftRail[i].b, leftRail[i + 1].b, leftRail[i + 1].a, col, col, col, col, ta, tb, tc, td, {0.0f, 0.0f, -1.0f}, { 0.0f, 0.0f, -1.0f }, { 0.0f, 0.0f, -1.0f }, { 0.0f, 0.0f, -1.0f }, 6.0f, 0.0f, 1.0f);
+				gl->glassHUDimage(handle, 1.0f);
+				    handle = gl->loadHUDimage_patch(rail_browser->text(rail_browser->value()), rightRail[i].a, rightRail[i].b, rightRail[i + 1].b, rightRail[i + 1].a, col, col, col, col, ta, tb, tc, td, { 0.0f, 0.0f, -1.0f }, { 0.0f, 0.0f, -1.0f }, { 0.0f, 0.0f, -1.0f }, { 0.0f, 0.0f, -1.0f }, 6.0f, 0.0f, 1.0f);
+				gl->glassHUDimage(handle, 1.0f);
+
+				if (i == railsteps_int - 1)
+					break;
+			}
+
+			Fl::redraw();
+		}
+	}
+
+	static void railsave_cb(Fl_Widget*, void* p)
+	{
+		cout << "Saving rail parameters.\n";
+	}
+
 	static void vertex_reset_cb(Fl_Widget*, void* p)
 	{
 		ifstream vfile("assets\/arena_vertex.txt");
@@ -2890,6 +3011,9 @@ public:
 		// OpenGL window
 		gl = new bluebush(5, 75, 1024, 575);
 
+		Fl_PNG_Image* icon = new Fl_PNG_Image("assets/icon.png");
+		gl->default_icon(icon);
+
 		EmptyObject = gl->getMarker_main();		
 		EmptyScene = gl->getMarker_ZC();
 
@@ -3096,9 +3220,6 @@ public:
 						}
 						manifest2.close();
 
-						// jam
-
-						// 670
 						mt_zoom_counter = new Fl_Float_Input(1110, 600, 80, 25, "Zoom");
 						mt_zoom_counter->callback(transformObject, (void*)false);
 						mt_zoom_counter->color(FL_GRAY);
@@ -3290,6 +3411,57 @@ public:
 						replace_button->callback(replaceTex_cb);
 					}
 					eee->end();
+
+					Fl_Group* fff = new Fl_Group(50, 75, 1430, 575, "HUD");
+					{
+						Fl_Group* group1 = new Fl_Group(1055, 100, 400, 390, "Rail Settings");
+						group1->box(FL_UP_FRAME);
+						group1->labeltype(FL_SHADOW_LABEL);
+						group1->end();
+
+						rail_browser = new Fl_Hold_Browser(1100, 110, 315, 225);
+						rail_browser->callback(rail_cb);
+						rail_browser->color(FL_GRAY);
+
+						railwidth_counter = new Fl_Float_Input(1250, 355, 45, 25, "Rail Width");
+						railwidth_counter->callback(rail_cb);
+						railwidth_counter->color(FL_GRAY);
+						railwidth_counter->value("1");
+
+						railgauge_counter = new Fl_Float_Input(1250, 385, 45, 25, "Rail Gauge");
+						railgauge_counter->callback(rail_cb);
+						railgauge_counter->color(FL_GRAY);
+						railgauge_counter->value("1");
+
+						railsteps_counter = new Fl_Float_Input(1250, 415, 45, 25, "Rail Steps");
+						railsteps_counter->callback(rail_cb);
+						railsteps_counter->color(FL_GRAY);
+						railsteps_counter->value("1");
+
+						railsave_button = new Fl_Button(1170, 450, 125, 25, "Save Parameters");
+						railsave_button->callback(railsave_cb);
+
+						string line;
+						ifstream manifest5("assets\/atlas.manifest");
+
+						if (manifest5.is_open())
+						{
+							while (!manifest5.eof())
+							{
+								std::getline(manifest5, line);
+
+								if (line != "")
+									rail_browser->add(line.c_str());
+
+								std::getline(manifest5, line); // skip
+								std::getline(manifest5, line); // skip
+								std::getline(manifest5, line); // skip
+								std::getline(manifest5, line); // skip
+							}
+						}
+						manifest5.close();
+					}
+					fff->end();
 				}
 				tabs->end();
 			}
