@@ -1,3 +1,7 @@
+// I'd like to implement the capture of loaded ara dimensions for static physics items, but I don't think we normally catch that.
+// The solution is something like, we catch the bounding for each ARA we load, and over-write it with the next one.
+// bluebush_arena is anyway custom.
+
 #define WIN32
 #define NOMINMAX
 #include <FL/Fl.H>
@@ -241,6 +245,10 @@ bool intex_bool = false;
 Fl_Check_Button* ortho_checkbox;
 Fl_Check_Button* backface_checkbox;
 Fl_Check_Button* wireframe_checkbox;
+Fl_Check_Button* originx_checkbox;
+Fl_Check_Button* originy_checkbox;
+Fl_Check_Button* originz_checkbox;
+Fl_Value_Slider* origin_slider;
 Fl_Float_Input* camera_counter;
 
 Fl_Text_Editor* vertex_editor;
@@ -776,6 +784,50 @@ void loading_ice_file(string filename)
 			Fl::redraw();
 		}
 	}
+}
+
+void saving_pcn_file(string filename)
+{
+	cout << "Saving PCN specification.\n";
+
+	ofstream SCNfile(filename, ios::out | ios::binary);
+	if (!SCNfile)
+	{
+		cout << "ARENA cannot for some reason save the SCN file.\n";
+		return;
+	}
+
+	string version = "1.00";
+	string::size_type sz = version.size(); // Get string size
+	SCNfile.write(reinterpret_cast<char*>(&sz), sizeof(string::size_type)); // Write string size
+	SCNfile.write(version.data(), sz); // Write string
+
+	int c = S.size(); // Object count
+	SCNfile.write(reinterpret_cast<char*>(&c), sizeof(int));
+
+	for (int i = 0; i < S.size(); i++)
+	{
+		sz = S[i].object_file.size(); // Get string size
+		SCNfile.write(reinterpret_cast<char*>(&sz), sizeof(string::size_type)); // Write string size
+		SCNfile.write(S[i].object_file.data(), sz); // Write string
+
+		coords3d ttranslate = { S[i].translate.x + scnGlobalPos.x, S[i].translate.y + scnGlobalPos.y, S[i].translate.z + scnGlobalPos.z };
+
+		SCNfile.write(reinterpret_cast<char*>(&ttranslate.x), sizeof(float));
+		SCNfile.write(reinterpret_cast<char*>(&ttranslate.y), sizeof(float));
+		SCNfile.write(reinterpret_cast<char*>(&ttranslate.z), sizeof(float));
+
+		SCNfile.write(reinterpret_cast<char*>(&S[i].rotate.x), sizeof(float));
+		SCNfile.write(reinterpret_cast<char*>(&S[i].rotate.y), sizeof(float));
+		SCNfile.write(reinterpret_cast<char*>(&S[i].rotate.z), sizeof(float));
+
+		SCNfile.write(reinterpret_cast<char*>(&S[i].scale), sizeof(float));
+	}
+
+	SCNfile.close();
+
+	scnAfterLoadHash = getSceneHash(); // "AfterLoad" is a bit of a misnomer in this case, but it's required to align them.
+	scnCurrentHash = scnAfterLoadHash;
 }
 
 void saving_scn_file(string filename)
@@ -1860,6 +1912,28 @@ private:
 			cout << "Cancelled from dialog.\n";
 	}
 
+	static void menu_save_pcn(Fl_Widget*, void*)
+	{
+		file_chooser = new Fl_Native_File_Chooser;
+		file_chooser->title("Save PCN");
+		file_chooser->type(Fl_Native_File_Chooser::BROWSE_SAVE_FILE);
+		file_chooser->filter("PCN\t*.pcn");
+		file_chooser->show();
+
+		if (file_chooser->filename() != "")
+		{
+			cout << "filename = " << file_chooser->filename() << "\n";
+			//static marker_type EmptyObject;
+			//EmptyObject.index_type = 1; // Main
+			//EmptyObject.index = 0;
+			//EmptyObject.isStatic = true;
+			//gl->resetimagesto(EmptyObject);
+			saving_pcn_file(file_chooser->filename());
+		}
+		else
+			cout << "Cancelled from dialog.\n";
+	}
+
 	static void menu_save_ara(Fl_Widget*, void*)
 	{
 		file_chooser = new Fl_Native_File_Chooser;
@@ -2082,10 +2156,15 @@ private:
 		//gl->setDynamicmode(true);
 
 		float y = 0;
+		int d = gl->loadHUDimage_patch("white0", { 150, 50 + y ,0 }, { 200, 50 + y,0 }, { 200,100 + y,0 }, { 150,100 + y,0 }, { 1,1,1 }, { 1,1,1 }, { 1,1,1 }, { 1,1,1 }, { 0,0 }, { 0,0 }, { 0,0 }, { 0,0 }, { 0,0,-1 }, { 0,0,-1 }, { 0,0,-1 }, { 0,0,-1 }, 3.0f, 0.0f, 1.0f);
+		gl->moveHUDimage(d, { 32.0f, 0.0f, -1.0f });
+		gl->glassHUDimage(d, 1.0f);
+
+		y = 0;
 		for (int i = 0; i < 5; i++)
 		{
 			int d = gl->loadHUDimage_patch("icon_rail", { 150, 50 + y ,0 }, { 200, 50 + y,0 }, { 200,100 + y,0 }, { 150,100 + y,0 }, { 1,1,1 }, { 1,1,1 }, { 1,1,1 }, { 1,1,1 }, { 0,0 }, { 0,0 }, { 0,0 }, { 0,0 }, { 0,0,-1 }, { 0,0,-1 }, { 0,0,-1 }, { 0,0,-1 }, 3.0f, 0.0f, 1.0f);
-			gl->glassHUDimage(d, 1.0f);
+			gl->glassHUDimage(d, 0.5f);
 			y = y + 70;
 		}
 
@@ -2368,6 +2447,27 @@ private:
 
 			gl->suppressMissingImages(false);
 
+			if (originx_checkbox->value() == 1)
+			{
+				int xchecker = gl->loadobject("assets\/checker.ara");
+				gl->rotateobject(xchecker, { 90.0f, 90.0f, 0.0f });
+				gl->glassobject(xchecker, (float)origin_slider->value());
+			}
+
+			if (originy_checkbox->value() == 1)
+			{
+				int ychecker = gl->loadobject("assets\/checker.ara");
+				gl->rotateobject(ychecker, { 0.0f, 90.0f, 0.0f });
+				gl->glassobject(ychecker, (float)origin_slider->value());
+			}
+
+			if (originz_checkbox->value() == 1)
+			{
+				int zchecker = gl->loadobject("assets\/checker.ara");
+				gl->rotateobject(zchecker, { 0.0f, 0.0f, 0.0f });
+				gl->glassobject(zchecker, (float)origin_slider->value());
+			}
+
 			coords3d dims = { maxBound.x - minBound.x, maxBound.y - minBound.y, maxBound.z - minBound.z };
 			string tb = "Dimensions: " + to_trimmedString(dims.x) + ", " + to_trimmedString(dims.y) + ", " + to_trimmedString(dims.z) + ", Spatial: min(" + to_trimmedString(minBound.x) + ", " + to_trimmedString(minBound.y) + ", " + to_trimmedString(minBound.z) + ") max(" + to_trimmedString(maxBound.x) + ", " + to_trimmedString(maxBound.y) + ", " + to_trimmedString(maxBound.z) + ")";
 			textbuff->text(tb.c_str());
@@ -2632,6 +2732,15 @@ private:
 			cout << "Wireframe off.\n";
 			gl->wireframe(false);
 		}
+
+		Fl::redraw();
+	}
+
+	static void origin_cb(Fl_Widget*, void*)
+	{
+		//cout << "Origin used.\n";
+
+		transformObject(mtabs1, (void*)false);
 
 		Fl::redraw();
 	}
@@ -3009,7 +3118,7 @@ public:
 		Fl::set_color(FL_SELECTION_COLOR, 200, 200, 200);
 
 		// OpenGL window
-		gl = new bluebush(5, 75, 1024, 575);
+		gl = new bluebush(5, 75, 1024, 575); // 1024, 575
 
 		Fl_PNG_Image* icon = new Fl_PNG_Image("assets/icon.png");
 		gl->default_icon(icon);
@@ -3018,12 +3127,13 @@ public:
 		EmptyScene = gl->getMarker_ZC();
 
 		menu = new Fl_Menu_Bar(0, 0, 1480, 25);
-		menu->add("File/New SCN", FL_CTRL + 'n', menu_new_scn);
-		menu->add("File/Load SCN", FL_CTRL + 'l', menu_load_scn);
-		menu->add("File/Save SCN", FL_CTRL + 's', menu_save_scn);
-		menu->add("File/Load ARA", FL_CTRL + 'a', menu_load_ara);
-		menu->add("File/Save ARA", FL_CTRL + 'o', menu_save_ara);
-		menu->add("File/Load ICE", FL_CTRL + 'i', menu_load_ice);
+		menu->add("File/New SCN Scene", FL_CTRL + 'n', menu_new_scn);
+		menu->add("File/Load SCN Scene", FL_CTRL + 'l', menu_load_scn);
+		menu->add("File/Save SCN Scene", FL_CTRL + 's', menu_save_scn);
+		menu->add("File/Save PCN Physics", FL_CTRL + 'p', menu_save_pcn);
+		menu->add("File/Load ARA Arena", FL_CTRL + 'a', menu_load_ara);
+		menu->add("File/Save ARA Arena", FL_CTRL + 'o', menu_save_ara);
+		menu->add("File/Load ICE Iceberg", FL_CTRL + 'i', menu_load_ice);
 		menu->add("File/Import Wavefront", FL_CTRL + 'w', menu_load_wavefront); // Attempt to import Wavefront. Add "Default Tex" to change white0.
 		menu->add("File/Exit ...", FL_CTRL + 'e', menu_quit);
 		menu->add("Test HUD", FL_CTRL + 'h', dummy);
@@ -3577,7 +3687,26 @@ public:
 						wireframe_checkbox->callback(wireframe_cb, (void*)false);
 						wireframe_checkbox->selection_color(FL_BLACK);
 
-						camera_counter = new Fl_Float_Input(1150, 220, 90, 25, "Camera Delta");
+						originx_checkbox = new Fl_Check_Button(1050, 220, 100, 35, "See Origin X");
+						originx_checkbox->callback(origin_cb, (void*)false);
+						originx_checkbox->selection_color(FL_BLACK);
+
+						originy_checkbox = new Fl_Check_Button(1160, 220, 30, 35, "Y");
+						originy_checkbox->callback(origin_cb, (void*)false);
+						originy_checkbox->selection_color(FL_BLACK);
+
+						originz_checkbox = new Fl_Check_Button(1200, 220, 30, 35, "Z");
+						originz_checkbox->callback(origin_cb, (void*)false);
+						originz_checkbox->selection_color(FL_BLACK);
+
+						origin_slider = new Fl_Value_Slider(1250, 225, 130, 25, "Origin Alpha");
+						origin_slider->minimum(0.00);
+						origin_slider->maximum(1.00);
+						origin_slider->value(0.5);
+						origin_slider->callback(origin_cb, (void*)false);
+						origin_slider->type(FL_HORIZONTAL);
+
+						camera_counter = new Fl_Float_Input(1150, 270, 90, 25, "Camera Delta");
 						camera_counter->callback(cameraDelta);
 						camera_counter->color(FL_GRAY);
 						camera_counter->value("250.0");

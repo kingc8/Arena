@@ -254,6 +254,21 @@
                 <key>scale9FromFile</key>
                 <false/>
             </struct>
+            <key type="filename">checker.png</key>
+            <struct type="IndividualSpriteSettings">
+                <key>pivotPoint</key>
+                <point_f>0.5,0.5</point_f>
+                <key>spriteScale</key>
+                <double>1</double>
+                <key>scale9Enabled</key>
+                <false/>
+                <key>scale9Borders</key>
+                <rect>8,8,16,16</rect>
+                <key>scale9Paddings</key>
+                <rect>8,8,16,16</rect>
+                <key>scale9FromFile</key>
+                <false/>
+            </struct>
             <key type="filename">cupboard.png</key>
             <struct type="IndividualSpriteSettings">
                 <key>pivotPoint</key>
@@ -590,6 +605,23 @@
                 <key>scale9FromFile</key>
                 <false/>
             </struct>
+            <key type="filename">wood0016.png</key>
+            <key type="filename">wood0017.png</key>
+            <key type="filename">wood0018.png</key>
+            <struct type="IndividualSpriteSettings">
+                <key>pivotPoint</key>
+                <point_f>0.5,0.5</point_f>
+                <key>spriteScale</key>
+                <double>1</double>
+                <key>scale9Enabled</key>
+                <false/>
+                <key>scale9Borders</key>
+                <rect>11,26,22,52</rect>
+                <key>scale9Paddings</key>
+                <rect>11,26,22,52</rect>
+                <key>scale9FromFile</key>
+                <false/>
+            </struct>
             <key type="filename">zombie.png</key>
             <struct type="IndividualSpriteSettings">
                 <key>pivotPoint</key>
@@ -666,6 +698,10 @@
                     <filename>zombie.png</filename>
                     <filename>mouse_blocked.png</filename>
                     <filename>superTree.png</filename>
+                    <filename>wood0016.png</filename>
+                    <filename>wood0017.png</filename>
+                    <filename>wood0018.png</filename>
+                    <filename>checker.png</filename>
                 </array>
             </struct>
         </map>

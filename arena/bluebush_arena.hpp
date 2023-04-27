@@ -1013,7 +1013,7 @@ private:
 
 		glMatrixMode(GL_PROJECTION);
 		glLoadIdentity();
-		glOrtho(0, xres, yres, 0, HUDnear, HUDfar);
+		glOrtho(0, 1280, 720, 0, HUDnear, HUDfar); // xres, yres // In a weird twist Arena FLTK needs to have this "1280,720" for correct HUD dimensions.
 		glMatrixMode(GL_MODELVIEW);
 		glLoadIdentity();
 
@@ -1030,6 +1030,7 @@ public:
 
 		xres = W;
 		yres = H;
+		cout << "xres = " << xres << ", " << yres << "\n";
 		updateVBO = false;
 		updateShaders = false;
 
