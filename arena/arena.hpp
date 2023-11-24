@@ -2,6 +2,11 @@
 // The solution is something like, we catch the bounding for each ARA we load, and over-write it with the next one.
 // bluebush_arena is anyway custom.
 
+// BUG We need to complete OrthoTex and port objects to new format, otherwise, Scene loader breaks.
+// It actually shouldn't break in the editor, even though in Production it would do that.
+
+
+
 #define WIN32
 #define NOMINMAX
 #include <FL/Fl.H>
@@ -11,6 +16,7 @@
 #include <FL/Fl_Button.H>
 #include <FL/Fl_Light_Button.H>
 #include <FL/Fl_Float_Input.H>
+#include <FL/Fl_Spinner.H>
 #include <FL/Fl_PNG_Image.H>
 #include <FL/Fl_Value_Slider.H>
 #include <FL/Fl_Roller.H>
@@ -25,6 +31,8 @@
 #include <FL/Fl_Hold_Browser.H>
 #include <FL/Fl_Scrollbar.H>
 #include <FL/Fl_Text_Editor.H>
+#include <FL/Fl_Roller.H>
+#include <FL/fl_message.H>
 #include <FL/Fl_Gl_Window.H>
 #include <gl/glew.h>
 #include <gl/GLU.h>
@@ -32,9 +40,13 @@
 #include "bluebush_arena.hpp"
 #include <iomanip>
 #include <algorithm>
+#include <cctype>
 #include <unordered_map>
 #include <unordered_set>
 #include <iterator>
+#include <filesystem>
+
+using namespace std;
 
 bluebush* gl;
 
@@ -95,13 +107,29 @@ struct coords3dHash
 	}
 };
 
+namespace std
+{
+	template <>
+	struct hash<coords3d>
+	{
+		size_t operator()(const coords3d& p) const
+		{
+			// Use the hash values of the three float fields to create a hash value for the point
+			std::size_t h1 = std::hash<float>()(p.x);
+			std::size_t h2 = std::hash<float>()(p.y);
+			std::size_t h3 = std::hash<float>()(p.z);
+			return h1 ^ (h2 << 1) ^ (h3 << 2);
+		}
+	};
+}
+
 struct Quad
 {
 	string tex_name = "";
 	coords3d v[4]; // Vertices
 	coords3d n[4]; // Normals
 	coords3d quad_normal = { 0.0f, 0.0f, 0.0f };
-	ipoint t[4];	// Texture coords
+	ipoint t[4] = { {0,0},{0,0},{0,0},{0,0} };	// Texture coords
 	int quad_handle = 0; // "image handle" returned by bluebush.
 	int complete = 0;
 };
@@ -112,13 +140,10 @@ struct Material
 	float alpha = 1.0f;
 	float fresnel = 2.0f;
 	float envmap = 0.0f;
-	string autotex_image = "";
-	ipoint autotex_offset = {0, 0};
-	float autotex_zoom = 1.0f;
-	float autotex_mixratio = 0.0f;
-	string multitex_image = "";
-	float multitex_zoom = 1.0f;
-	float multitex_mixratio = 0.0f;
+	string orthotex_image = "";
+	float orthotex_Zoffset = 0;
+	float orthotex_zoom = 1.0f;
+	float orthotex_mixratio = 0.0f;
 	bool reverse_winding = false;
 };
 
@@ -145,6 +170,12 @@ struct Scene
 	float scale = 1.0f;
 };
 
+struct CubemapPair
+{
+	string name = "";
+	string path = "";
+};
+
 Object ara_original;
 Object ara_transformed;
 
@@ -165,6 +196,13 @@ bool cameraOn = false;
 float cameraSpeed = 250.0f;
 
 int lastNormalsCalced = 0; // 1 Average, 2 Faceted.
+
+struct VertexTuple
+{
+	coords3d vertex;
+	point texcoord;
+	coords3d normal;
+};
 
 Fl_Text_Display* quadCount_display;
 Fl_Text_Buffer* quadCountbuff;
@@ -201,14 +239,16 @@ Fl_Text_Buffer* textbuff;
 Fl_Text_Display* camera_display;
 Fl_Text_Buffer* camerabuff;
 
+Fl_Hold_Browser* quadBrowser;
+Fl_Spinner* quadPinch_spinner;
+Fl_Check_Button* quadToggle_checkbox;
+Fl_Value_Slider* quadRotate_slider;
+
 Fl_Hold_Browser* imgbrowser;
-Fl_Hold_Browser* multiimgbrowser;
-Fl_Float_Input* xoffset_counter;
-Fl_Float_Input* yoffset_counter;
+Fl_Float_Input* zoffset_counter;
+Fl_Roller* zoffset_roller;
 Fl_Float_Input* zoom_counter;
 Fl_Value_Slider* mixratio_slider;
-Fl_Float_Input* mt_zoom_counter;
-Fl_Value_Slider* mt_mixratio_slider;
 
 unordered_set<string> current_textures;
 Fl_Hold_Browser* current_browser;
@@ -234,6 +274,14 @@ Fl_Button* scn_down_button;
 Fl_Float_Input* scn_gblx_counter;
 Fl_Float_Input* scn_gbly_counter;
 Fl_Float_Input* scn_gblz_counter;
+Fl_Choice* scn_shape_dropdown;
+Fl_Check_Button* scn_physics_checkbox;
+
+Fl_Hold_Browser* cubemap_browser;
+Fl_Button* scn_cubemap_button;
+Fl_Button* scn_cubemap_delete_button;
+Fl_Input* cubemapInput;
+vector<CubemapPair> cubemapData;
 
 Fl_Hold_Browser* wavefront_browser;
 string wavefront_reference = "white0";
@@ -277,6 +325,10 @@ vector <point> texcoord_list;
 size_t scnAfterLoadHash = 0;
 size_t scnCurrentHash = 0;
 
+string initial_ara = "";
+
+bool mouse_click = false;
+
 float rounding(float var)
 {
 	// 37.66666 * 100 =3766.66
@@ -302,6 +354,35 @@ size_t stringHash(const std::string& s)
 	return h;
 }
 
+void getPathAndFilename(string fullpath, string& pathonly, string& fileonly)
+{	
+	bool foundFile = false;
+
+	for (int i = fullpath.size() - 1; i > -1; i--) // Go backwards to find the slash
+	{
+		if (fullpath[i] != '\\' && foundFile == false)
+			fileonly = fileonly + fullpath[i];
+		else
+		{
+			foundFile = true;
+			pathonly = pathonly + fullpath[i];
+		}
+	}
+
+	string ffn;
+
+	for (int i = fileonly.size() - 1; i > -1; i--) // Reverse the filename again.
+		ffn = ffn + fileonly[i];
+
+	string ffp;
+
+	for (int i = pathonly.size() - 1; i > -1; i--) // Reverse the filepath again.
+		ffp = ffp + pathonly[i];
+
+	fileonly = ffn;
+	pathonly = ffp;
+}
+
 size_t getSceneHash()
 {
 	string sceneString = "";
@@ -311,21 +392,6 @@ size_t getSceneHash()
 		to_string(S[i].rotate.x) + to_string(S[i].rotate.y) + to_string(S[i].rotate.z) + to_string(S[i].scale);
 
 	return stringHash(sceneString);
-
-	/*
-	vector <string> sceneStringVector;
-	sceneStringVector.clear();
-
-	// Load all Scene struct components for each index into a new vector as a string-per-line.
-	for ( int i = 0 ; i < S.size() ; i++ )
-		sceneStringVector.emplace_back( S[i].object_file + S[i].object_path + to_string(S[i].translate.x) + to_string(S[i].translate.y) + to_string(S[i].translate.z) +
-		to_string(S[i].rotate.x) + to_string(S[i].rotate.y) + to_string(S[i].rotate.z) + to_string(S[i].scale));
-
-	// Create checksum by XORing the hashes of all the strings in the vector
-	size_t checksum = std::accumulate(sceneStringVector.begin(), sceneStringVector.end(), size_t{ 0 },
-		[](size_t a, const std::string& b) { return a ^ stringHash(b); });
-	*/
-	//return checksum;
 }
 
 void calc_quad_normals()
@@ -380,22 +446,50 @@ void calc_quad_normals()
 	}
 }
 
-void generate_unique_verts()
-{	
-	unique_verts.clear();
+void generate_average_normals()
+{
+	unordered_map<coords3d, vector<int>> adjacentMap;
+
+	// Collect unique verts and add a list to each one of the quad index they are used in. These are the adjacent vertices.
 
 	for (int i = 0; i < ara_transformed.quad_count; i++) // Step through each quad.
-	{
 		for (int j = 0; j < 4; j++) // Check the four corners of the quad.
+			adjacentMap[ara_transformed.q[i].v[j]].push_back(i); // Map this vertex to this Quad index.
+
+	map<coords3d, coords3d> vertexNormalMap; // Where we store our vertices -> normal calculations.
+
+	// Iterate through all the vertex keys and process the list of quad indices
+
+	for (const std::pair<coords3d, std::vector<int>>& entry : adjacentMap)
+	{
+		const coords3d& key = entry.first;
+		const std::vector<int>& value = entry.second;
+
+		coords3d resultant = { 0.0f, 0.0f, 0.0f };
+
+		for (int val : value)
+			resultant = resultant + ara_transformed.q[val].quad_normal;
+
+		resultant = gl->normalize(resultant);
+		vertexNormalMap[key] = resultant;
+	}
+
+	// Iterate of ara_transformed and search the map for each vertex and assign the new per-vertex resultant.
+
+	for (int i = 0 ; i < ara_transformed.quad_count ; i++)
+	{
+		for (int j = 0; j < 4; j++)
 		{
-			auto it = unique_verts.find(ara_transformed.q[i].v[j]);
-			if (it != unique_verts.end()) // Found one.
+			std::map<coords3d, coords3d>::iterator iter = vertexNormalMap.find(ara_transformed.q[i].v[j]);
+			if (iter != vertexNormalMap.end())
 			{
-				coords3d resultant = gl->normalize(it->second + ara_transformed.q[i].quad_normal);
-				unique_verts[ara_transformed.q[i].v[j]] = resultant; // We reinsert the same key with the new resultant, over-writing it.
+				const coords3d& key = iter->first;
+				const coords3d& value = iter->second;
+				ara_transformed.q[i].n[j] = value;
+				ara_original.q[i].n[j] = value;
 			}
-			else // Not found, add one with initial quad_normal, that through addition is the resultant.
-				unique_verts[ara_transformed.q[i].v[j]] = ara_transformed.q[i].quad_normal;
+			else
+				std::cout << " !!! Key not found in the map. !!!" << std::endl;
 		}
 	}
 }
@@ -419,9 +513,15 @@ void global_transformObject() // Calculate ara_transformed, No Bounds generation
 		m.fresnel = fresnel_slider->value();
 
 		if (light_facet_button->value() == 1)
+		{
 			m.faceted = true;
+			ara_transformed.m.faceted = true;
+		}
 		else if (light_average_button->value() == 1)
+		{
 			m.faceted = false;
+			ara_transformed.m.faceted = false;
+		}
 
 		if (winding_checkbox->value() == 1)
 			m.reverse_winding = true;
@@ -429,23 +529,25 @@ void global_transformObject() // Calculate ara_transformed, No Bounds generation
 			m.reverse_winding = false;
 
 		if (imgbrowser->value() > 0) // Something was selected.
-		{
-			m.autotex_image = imgbrowser->text(imgbrowser->value());
-			m.autotex_offset = { atoi(xoffset_counter->value()), atoi(yoffset_counter->value()) };
-			m.autotex_zoom = stof(zoom_counter->value());
-			m.autotex_mixratio = mixratio_slider->value();
-		}
+		{ 
+			m.orthotex_image = imgbrowser->text(imgbrowser->value());
 
-		if (multiimgbrowser->value() > 0) // Something was selected.
-		{
-			m.multitex_image = multiimgbrowser->text(multiimgbrowser->value());
-			m.multitex_zoom = stof(mt_zoom_counter->value());
-			m.multitex_mixratio = mt_mixratio_slider->value();
+			if (zoffset_roller->changed() != 0  ) // If roller changed value, over-write zoffset counter.
+			{
+				m.orthotex_Zoffset = zoffset_roller->value();
+				zoffset_counter->value(to_trimmedString(zoffset_roller->value()).c_str());
+			}
+			else
+				m.orthotex_Zoffset = atoi(zoffset_counter->value());
+
+			m.orthotex_zoom = stof(zoom_counter->value());
+			m.orthotex_mixratio = mixratio_slider->value();
 		}
 
 		ara_transformed.m = m;
 		ara_transformed.quad_count = ara_original.quad_count;
 
+		Object ara_previous = ara_transformed; // Hang on to previously calculated normals.
 		ara_transformed.q.clear();
 
 		Quad q;
@@ -477,30 +579,20 @@ void global_transformObject() // Calculate ara_transformed, No Bounds generation
 		if (ara_transformed.m.faceted == false)
 		{
 			calc_quad_normals();
-
-			generate_unique_verts(); // Also collects quad normals and calculates normalized resultants
-
-			// Distribute resultants to all quads
-
-			for (int i = 0; i < ara_transformed.quad_count; i++) // Step through each quad.
-			{
-				for (int j = 0; j < 4; j++) // Check the four corners of the quad.
-				{
-					auto it = unique_verts.find(ara_transformed.q[i].v[j]);
-					if (it != unique_verts.end()) // Found one.
-					{
-						ara_original.q[i].n[j] = it->second;
-						ara_transformed.q[i].n[j] = it->second;
-					}
-					else
-							cout << "Couldn't find vertex in lookup! -Shouldn't happen.\n";
-				}
-			}
+			generate_average_normals();
 		}
 		else if (ara_transformed.m.faceted == true)
 		{
 			calc_quad_normals();
 		}
+		else
+			{
+				// Pass the normals as they are.
+
+				for (int i = 0; i < ara_original.quad_count; i++)
+					for (int j = 0; j < 4; j++)
+						ara_transformed.q[i].n[j] = ara_previous.q[i].n[j];
+			}
 	}
 }
 
@@ -703,6 +795,7 @@ void loading_ice_file(string filename)
 
 				getline(objfile, line);
 				ara_original.m.alpha = stof(line.c_str()); // Alpha is appended here for legacy reasons, it seems.
+				cout << "ICE alpha for manifold = " << ara_original.m.alpha << "\n";
 
 				// .Reverse flag
 
@@ -722,14 +815,15 @@ void loading_ice_file(string filename)
 				coords3d col = { 1.0f, 1.0f, 1.0f }; // We default vertex color to "white"
 
 				if (ara_original.m.reverse_winding == false)
+				{
 					q.quad_handle = gl->loadimage_patch(q.tex_name, q.v[0], q.v[1], q.v[2], q.v[3], col, col, col, col, q.t[0], q.t[1], q.t[2], q.t[3], q.n[0], q.n[1], q.n[2], q.n[3], ara_original.m.fresnel, ara_original.m.envmap, ara_original.m.alpha);
-
+					cout<<"ICE patch " <<q.quad_handle<<"\n";
+				}
 				else if (ara_original.m.reverse_winding == true)
+				{
 					q.quad_handle = gl->loadimage_patch_r(q.tex_name, q.v[0], q.v[1], q.v[2], q.v[3], col, col, col, col, q.t[0], q.t[1], q.t[2], q.t[3], q.n[0], q.n[1], q.n[2], q.n[3], ara_original.m.fresnel, ara_original.m.envmap, ara_original.m.alpha);
-
-				gl->autoteximage(q.quad_handle, "white0", 0, 0.0f);
-				gl->scrollImageAutoTexture(q.quad_handle, {0,0});
-				gl->multiteximage(q.quad_handle, "white0", 0, 0.0f);
+					cout << "ICE patch_r " << q.quad_handle << "\n";
+				}
 
 				gl->glassimage(q.quad_handle, 1.0);
 
@@ -753,26 +847,20 @@ void loading_ice_file(string filename)
 			alpha_slider->value(ara_original.m.alpha);
 
 			mixratio_slider->value(0.0);  	// ICE doesn't support these properties, so we turn them off on the UI.
-			mt_mixratio_slider->value(0.0);
-			xoffset_counter->value("0.0");
-			yoffset_counter->value("0.0");
-			zoom_counter->value("0.0");
-			mt_zoom_counter->value("0.0");
+			zoffset_counter->value("0.00");
+			zoffset_roller->value(0.00);
+			zoom_counter->value("0.00");
 			imgbrowser->value(0);
-			multiimgbrowser->value(0);
 
 			if (ara_original.m.reverse_winding == true)
 				winding_checkbox->value(1);
 			if (ara_original.m.reverse_winding == false)
 				winding_checkbox->value(0);
-			
-			ara_original.m.autotex_image = "";	// These are hints that ICE files don't have, so we set them to zero.
-			ara_original.m.autotex_offset = { 0, 0 };
-			ara_original.m.autotex_mixratio = 0.0f;
-			ara_original.m.autotex_zoom = 0.0f;
-			ara_original.m.multitex_image = "";
-			ara_original.m.multitex_mixratio = 0.0f;
-			ara_original.m.multitex_zoom = 0.0f;
+
+			ara_original.m.orthotex_image = "";
+			ara_original.m.orthotex_Zoffset = 0.0f;
+			ara_original.m.orthotex_mixratio = 0;
+			ara_original.m.orthotex_zoom = 0.0f;
 
 			coords3d dims = { maxBound.x - minBound.x, maxBound.y - minBound.y, maxBound.z - minBound.z };
 			string tb = "Dimensions: " + to_trimmedString(dims.x) + ", " + to_trimmedString(dims.y) + ", " + to_trimmedString(dims.z) + ", Spatial: min(" + to_trimmedString(minBound.x) + ", " + to_trimmedString(minBound.y) + ", " + to_trimmedString(minBound.z) + ") max(" + to_trimmedString(maxBound.x) + ", " + to_trimmedString(maxBound.y) + ", " + to_trimmedString(maxBound.z) + ")";				
@@ -784,50 +872,6 @@ void loading_ice_file(string filename)
 			Fl::redraw();
 		}
 	}
-}
-
-void saving_pcn_file(string filename)
-{
-	cout << "Saving PCN specification.\n";
-
-	ofstream SCNfile(filename, ios::out | ios::binary);
-	if (!SCNfile)
-	{
-		cout << "ARENA cannot for some reason save the SCN file.\n";
-		return;
-	}
-
-	string version = "1.00";
-	string::size_type sz = version.size(); // Get string size
-	SCNfile.write(reinterpret_cast<char*>(&sz), sizeof(string::size_type)); // Write string size
-	SCNfile.write(version.data(), sz); // Write string
-
-	int c = S.size(); // Object count
-	SCNfile.write(reinterpret_cast<char*>(&c), sizeof(int));
-
-	for (int i = 0; i < S.size(); i++)
-	{
-		sz = S[i].object_file.size(); // Get string size
-		SCNfile.write(reinterpret_cast<char*>(&sz), sizeof(string::size_type)); // Write string size
-		SCNfile.write(S[i].object_file.data(), sz); // Write string
-
-		coords3d ttranslate = { S[i].translate.x + scnGlobalPos.x, S[i].translate.y + scnGlobalPos.y, S[i].translate.z + scnGlobalPos.z };
-
-		SCNfile.write(reinterpret_cast<char*>(&ttranslate.x), sizeof(float));
-		SCNfile.write(reinterpret_cast<char*>(&ttranslate.y), sizeof(float));
-		SCNfile.write(reinterpret_cast<char*>(&ttranslate.z), sizeof(float));
-
-		SCNfile.write(reinterpret_cast<char*>(&S[i].rotate.x), sizeof(float));
-		SCNfile.write(reinterpret_cast<char*>(&S[i].rotate.y), sizeof(float));
-		SCNfile.write(reinterpret_cast<char*>(&S[i].rotate.z), sizeof(float));
-
-		SCNfile.write(reinterpret_cast<char*>(&S[i].scale), sizeof(float));
-	}
-
-	SCNfile.close();
-
-	scnAfterLoadHash = getSceneHash(); // "AfterLoad" is a bit of a misnomer in this case, but it's required to align them.
-	scnCurrentHash = scnAfterLoadHash;
 }
 
 void saving_scn_file(string filename)
@@ -947,13 +991,16 @@ void loading_scn_file(string filename)
 
 		cout << "  SCN object = " << s.object_file << "\n";
 		int o = gl->loadZCobject(s.object_path + s.object_file);
-		gl->moveZCobject(o, s.translate);
-		gl->rotateZCobject(o, s.rotate);
-		gl->scaleZCobject(o, s.scale);
-		gl->glassZCobject(o, 1.0f);
+		if (o != -1)
+		{
+			gl->moveZCobject(o, s.translate);
+			gl->rotateZCobject(o, s.rotate);
+			gl->scaleZCobject(o, s.scale);
+			gl->glassZCobject(o, 1.0f);
 
-		S.emplace_back(s);
-		scene_browser->add(s.object_file.c_str());
+			S.emplace_back(s);
+			scene_browser->add(s.object_file.c_str());
+		}
 	}
 
 	gl->suppressMissingImages(false);
@@ -981,7 +1028,7 @@ void saving_ara_file(string filename)
 		return;
 	}
 
-	string version = "1.00";
+	string version = "1.01";
 	string::size_type sz = version.size(); // Get string size
 	ARAfile.write(reinterpret_cast<char*>(&sz), sizeof(string::size_type)); // Write string size
 	ARAfile.write(version.data(), sz); // Write string
@@ -1003,22 +1050,14 @@ void saving_ara_file(string filename)
 	ARAfile.write(reinterpret_cast<char*>(&ara_transformed.m.envmap), sizeof(float));
 	ARAfile.write(reinterpret_cast<char*>(&ara_transformed.m.alpha), sizeof(float));
 
-	sz = ara_transformed.m.autotex_image.size(); // Get string size
+	sz = ara_transformed.m.orthotex_image.size(); // Get string size
 	ARAfile.write(reinterpret_cast<char*>(&sz), sizeof(string::size_type)); // Write string size
-	ARAfile.write(ara_transformed.m.autotex_image.data(), sz); // Write string
+	ARAfile.write(ara_transformed.m.orthotex_image.data(), sz); // Write string
 
-	ARAfile.write(reinterpret_cast<char*>(&ara_transformed.m.autotex_zoom), sizeof(float));
-	ARAfile.write(reinterpret_cast<char*>(&ara_transformed.m.autotex_mixratio), sizeof(float));
-	ARAfile.write(reinterpret_cast<char*>(&ara_transformed.m.autotex_offset.x), sizeof(float));
-	ARAfile.write(reinterpret_cast<char*>(&ara_transformed.m.autotex_offset.y), sizeof(float));
-
-	sz = ara_transformed.m.multitex_image.size(); // Get string size
-	ARAfile.write(reinterpret_cast<char*>(&sz), sizeof(string::size_type)); // Write string size
-	ARAfile.write(ara_transformed.m.multitex_image.data(), sz); // Write string
-
-	ARAfile.write(reinterpret_cast<char*>(&ara_transformed.m.multitex_zoom), sizeof(float));
-	ARAfile.write(reinterpret_cast<char*>(&ara_transformed.m.multitex_mixratio), sizeof(float));
-
+	ARAfile.write(reinterpret_cast<char*>(&ara_transformed.m.orthotex_zoom), sizeof(float));
+	ARAfile.write(reinterpret_cast<char*>(&ara_transformed.m.orthotex_mixratio), sizeof(float));
+	ARAfile.write(reinterpret_cast<char*>(&ara_transformed.m.orthotex_Zoffset), sizeof(float));
+	
 	for (int i = 0 ; i < ara_transformed.quad_count ; i++)
 	{
 		sz = ara_transformed.q[i].tex_name.size(); // Get string size
@@ -1079,6 +1118,92 @@ void saving_ara_file(string filename)
 	}
 
 	ARAfile.close();
+}
+
+void exporting_obj_file(string filename)
+{
+	cout << "Exporting to Wavefront OBJ.\n";
+
+	global_transformObject(); // Generate updated state of ara_transformed.
+
+	vector <coords3d> originalVerts; // This is a parallel structure to ara_transformed.q[].v[]
+	Object ara_scaled;
+	ara_scaled = ara_transformed;
+
+	for (int i = 0 ; i < ara_scaled.quad_count ; i++) // Scaled version of ara_transformed.
+		for (int j = 0; j < 4; j++)
+		{
+			if (ara_scaled.q[i].v[j].x != 0.0f) // Avoid dividing by zero.
+				ara_scaled.q[i].v[j].x = ara_scaled.q[i].v[j].x / 150.0f; // Scaling it back down for export.
+			if (ara_scaled.q[i].v[j].y != 0.0f)
+				ara_scaled.q[i].v[j].y = ara_scaled.q[i].v[j].y / 150.0f;
+			if (ara_scaled.q[i].v[j].z != 0.0f)
+				ara_scaled.q[i].v[j].z = ara_scaled.q[i].v[j].z / 150.0f;
+
+			originalVerts.push_back(ara_scaled.q[i].v[j]);
+		}
+
+	unordered_set<coords3d> wavefrontVerts_set(originalVerts.begin(), originalVerts.end()); // Dedupe
+	vector <coords3d> refinedVerts(wavefrontVerts_set.begin(), wavefrontVerts_set.end()); // Copy to ordinary vector
+
+	ofstream wffile;
+	wffile.open(filename);
+	wffile << "# This Wavefront Object file was generated by Arena.\n";
+	wffile << "\n";
+	wffile << "# " << refinedVerts.size() <<" Vertices.\n";
+	wffile << "\n";
+
+	for (int i = 0; i < refinedVerts.size(); i++)
+		wffile << "v " << refinedVerts[i].x << " " << refinedVerts[i].y << " " << refinedVerts[i].z << "\n";
+	
+	// We collect the indices matching to the ARA structure first, so that we can reverse the winding to conform to the OBJ format.
+	
+	struct wavefrontFace
+	{
+		int vIndx[4]= { 0,0,0,0 };
+	};
+
+	vector <wavefrontFace> wf; // We now map refinedVerts to indices.
+	
+	for (int i = 0 ; i < ara_scaled.quad_count ; i++)
+	{
+		wavefrontFace w;
+
+		for (int j = 0; j < 4; j++)
+		{
+			for (int k = 0; k < refinedVerts.size(); k++)
+			{
+				if (ara_scaled.q[i].v[j] == refinedVerts[k]) // There are many ajacement vertices, but we only need to find the first.
+				{
+					w.vIndx[j] = k + 1;
+					//refinedVerts.erase(refinedVerts.begin() + k); // remove it and restart.
+					break;
+				}
+			}
+		}
+
+		wf.push_back(w);
+	}
+
+	string p, f;
+	getPathAndFilename(filename, p, f);
+
+	wffile << "\n";
+	wffile << "o "<< f << "\n";
+	wffile << "\n";
+
+	wffile << "# " << wf.size() << " Faces.\n";
+	wffile << "\n";
+
+	for (int i = 0; i < wf.size(); i++) // Now stitch faces, in reverse order.
+		wffile << "f " << wf[i].vIndx[0] << "// " // We repeat the index for the normal because they are synced. NEEDS REPLACED WITH CUSTOM NORM INDICES.
+			           << wf[i].vIndx[1] << "// "
+			           << wf[i].vIndx[2] << "// "
+			           << wf[i].vIndx[3] << "//\n";
+
+	wffile.close();
+
+	cout << "Export complete.\n";
 }
 
 bool obj_IsVertexLine(string line)
@@ -1299,14 +1424,12 @@ Quad quadFromLine(string line)
 			{
 				if (parseLevel == 0) // vert 1 vert
 				{
-					//cout << "vert[" << j << "] = " << verts[j] << "\n";
 					verts[j] = atoi(tmp.c_str());
 					tmp = "";
 					parseLevel++;
 				}
 				else if (parseLevel == 1) // vert 1 texCoord
 				{
-					//cout << "texcoords[" << j << "] = " << texcoords[j] << "\n";
 					texcoords[j] = atoi(tmp.c_str());
 					tmp = "";
 					parseLevel++;
@@ -1348,10 +1471,6 @@ Quad quadFromLine(string line)
 
 	for (int i = 0; i < 4; i++)
 	{
-		// fartball_tree0.obj crashes this at i = 16, verts[i] = 0 (vertex_list = 1104 (correct)) DEBUG
-
-		//cout << "i = " << i << ", verts[0] = " << verts[0] << ", verts[i]-1 = " << verts[i] - 1 << ", vertex_list[0].xyz = " << vertex_list[0].x << ", " << vertex_list[0].y << ", " << vertex_list[0].z << "\n";
-
 		q.v[i] = { vertex_list[verts[i] - 1].x * 150.0f, vertex_list[verts[i] - 1].y * 150.0f, vertex_list[verts[i] - 1].z * 150.0f }; // Scale it up a little.
 
 		if (i == 0) // "A"
@@ -1549,7 +1668,117 @@ Quad triFromLine(string line) // We only use A,B,C of the quad.
 	return q;
 }
 
-void loading_obj_file(string filename) // ara_transformed still working in static array mode.... FIX!
+vector<string> tuplesFromLine(string line) // Simply breaks up each vertex tuple V/T/N into a string vector.
+{
+	vector<string> vt;
+
+	string portion = "";
+
+	for (int i = 0; i < line.size(); i++)
+	{
+		if (line[i] != ' ')
+			portion = portion + line[i];
+		else
+		{
+			vt.emplace_back(portion);
+			portion = "";
+		}
+	}
+
+	vt.erase(vt.begin()); // Remove the "f" picked up in the first token.
+
+	return vt;
+}
+
+coords3d vertexFromTuple(string t) // Family includes texcoordFromTuple
+{
+	coords3d v;
+
+	string portion_string = "";
+
+	for (int i = 0; i < t.size(); i++)
+	{
+		if (t[i] != '/')
+			portion_string = portion_string + t[i];
+		else
+			break;
+	}
+
+	int portion_int = atoi(portion_string.c_str());
+	v = vertex_list[portion_int - 1]; // Native unscaled vertex.
+
+	return v;
+}
+
+point texcoordFromTuple(string t)
+{
+	point tx;
+
+	return tx;
+}
+
+coords3d findCentralVertex(vector<string> vt)
+{
+	coords3d accum_vertex;
+
+	for (int i = 0; i < vt.size(); i++)
+		accum_vertex = accum_vertex + vertexFromTuple(vt[i]);
+
+	accum_vertex.x = accum_vertex.x / vt.size();
+	accum_vertex.y = accum_vertex.y / vt.size();
+	accum_vertex.z = accum_vertex.z / vt.size();
+
+	return accum_vertex;
+}
+
+vector<Quad> stitchExoticPatch(vector<coords3d> patch_list, coords3d centre_vert)
+{
+	vector<Quad> qv;
+
+	Quad q;
+
+	for (int i = 0; i < patch_list.size(); i++)
+	{
+		q.tex_name = wavefront_reference;
+		q.v[0] = { patch_list[i].x * 150.0f, patch_list[i].y * 150.0f, patch_list[i].z * 150.0f };
+		if ( i == patch_list.size()-1) // Wrap-around to first index at the end to close it.
+			q.v[1] = { patch_list[0].x * 150.0f, patch_list[0].y * 150.0f, patch_list[0].z * 150.0f };
+		else
+			q.v[1] = { patch_list[i + 1].x * 150.0f, patch_list[i + 1].y * 150.0f, patch_list[i + 1].z * 150.0f };
+		q.v[2] = { centre_vert.x * 150.0f, centre_vert.y * 150.0f, centre_vert.z * 150.0f };
+		q.v[3] = { centre_vert.x * 150.0f, centre_vert.y * 150.0f, centre_vert.z * 150.0f };
+		qv.emplace_back(q);
+	}
+
+	return qv;
+}
+
+vector<Quad> exoticFromLine( string line )
+{
+	vector<Quad> exg;
+
+	if (lineHasSlash(line) == true)
+	{
+		vector<string> vt;
+		vt = tuplesFromLine(line);
+		coords3d cv = findCentralVertex(vt);
+
+		vector <coords3d> vert_surface;
+
+		for (int i = 0; i < vt.size(); i++)
+			vert_surface.emplace_back(vertexFromTuple(vt[i])); // The verts we'll be stitching with.
+
+		exg = stitchExoticPatch(vert_surface, cv);
+	}
+	else
+	{
+		cout << "!!! Vertex-Only exotic surface, not yet supported !!!\n"; // No slashes v/t/n
+	}
+
+	return exg;
+}
+
+void loading_obj_file(string filename)
 {
 	cout << "Loading Wavefront Object. - "<<filename<<"\n";
 
@@ -1563,6 +1792,7 @@ void loading_obj_file(string filename) // ara_transformed still working in stati
 
 	int quadCount = 0;
 	int triCount = 0;
+	int exoticCount = 0;
 
 	minBound = { 0.0f, 0.0f, 0.0f }; // remember to attempt to calculate this along the way.
 	maxBound = { 0.0f, 0.0f, 0.0f };
@@ -1611,12 +1841,29 @@ void loading_obj_file(string filename) // ara_transformed still working in stati
 					triCount++;
 				}
 				else
-					cout << "Exotic unsupported face with " << FaceVertexCount(line) << " vertices.\n";
+				{
+					vector<Quad> exoticGeo = exoticFromLine(line);
+
+					for (int i = 0; i < exoticGeo.size(); i++)
+					{
+						Quad q;
+						q = exoticGeo[i];
+						
+						ara_original.q.emplace_back(q);
+
+						coords3d col = { 1.0f, 1.0f, 1.0f }; // We default vertex color to "white"
+						q.quad_handle = gl->loadimage_patch(q.tex_name, q.v[0], q.v[1], q.v[2], q.v[3], col, col, col, col, q.t[0], q.t[1], q.t[2], q.t[3], q.n[0], q.n[1], q.n[2], q.n[3], ara_original.m.fresnel, ara_original.m.envmap, ara_original.m.alpha);
+						gl->glassimage(q.quad_handle, 1.0f);
+					}
+
+					exoticCount++;
+				}
 			}
 		}
 
 		cout << quadCount << " quads found.\n";
 		cout << triCount << " triangles found.\n";
+		cout << exoticCount << " exotics found. (Averaged centre texcoord not yet calculated.)\n";
 
 		objfile.close();
 	}
@@ -1650,26 +1897,20 @@ void loading_obj_file(string filename) // ara_transformed still working in stati
 	alpha_slider->value(ara_original.m.alpha);
 
 	mixratio_slider->value(0.0);  	// Wavefront doesn't support these properties, so we turn them off on the UI.
-	mt_mixratio_slider->value(0.0);
-	xoffset_counter->value("0.0");
-	yoffset_counter->value("0.0");
-	zoom_counter->value("0.0");
-	mt_zoom_counter->value("0.0");
+	zoffset_counter->value("0.00");
+	zoffset_roller->value(0.00);
+	zoom_counter->value("0.00");
 	imgbrowser->value(0);
-	multiimgbrowser->value(0);
 
 	//if (ara_original.m.reverse_winding == true)
 	//	winding_checkbox->value(1);
 	//if (ara_original.m.reverse_winding == false)
 		winding_checkbox->value(0);
 
-	ara_original.m.autotex_image = "";	// These are hints that Wavefront files don't have, so we set them to zero.
-	ara_original.m.autotex_offset = { 0, 0 };
-	ara_original.m.autotex_mixratio = 0.0f;
-	ara_original.m.autotex_zoom = 0.0f;
-	ara_original.m.multitex_image = "";
-	ara_original.m.multitex_mixratio = 0.0f;
-	ara_original.m.multitex_zoom = 0.0f;
+	ara_original.m.orthotex_image = "";
+	ara_original.m.orthotex_Zoffset = 0.0f;
+	ara_original.m.orthotex_mixratio = 0.0f;
+	ara_original.m.orthotex_zoom = 0.0f;
 
 	ara_transformed.m = ara_original.m;
 
@@ -1681,12 +1922,17 @@ void loading_obj_file(string filename) // ara_transformed still working in stati
 	Fl::redraw();
 }
 
-void loading_ara_file(string filename)
+void loading_ara_file(string filename, bool additive, Transform t)
 {
-	cout << "Loading ARA specification. ("<<filename<<")\n";
+	if (additive == false)
+	{
+		cout << "Loading ARA specification. (" << filename << ")\n";
 
-	minBound = { 0.0f, 0.0f, 0.0f };
-	maxBound = { 0.0f, 0.0f, 0.0f };
+		minBound = { 0.0f, 0.0f, 0.0f };
+		maxBound = { 0.0f, 0.0f, 0.0f };
+	}
+	else
+		cout << "Merging ARA specification. (" << filename << ")\n";
 
 	ifstream arafile;
 	arafile.open(filename, ios::binary);
@@ -1714,23 +1960,46 @@ void loading_ara_file(string filename)
 	arafile.read(reinterpret_cast<char*>(&ara_original.m.envmap), sizeof(float));
 	arafile.read(reinterpret_cast<char*>(&ara_original.m.alpha), sizeof(float));
 
-	arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
-	ara_original.m.autotex_image.resize(sz);
-	arafile.read(&ara_original.m.autotex_image[0], sz);
+	if (version == "1.00") // Deprecated autotex and multitex
+	{
+		cout << "Version 1.00 - Loading deprecated features 'autotex' and 'multitex'.\n";
 
-	arafile.read(reinterpret_cast<char*>(&ara_original.m.autotex_zoom), sizeof(float));
-	arafile.read(reinterpret_cast<char*>(&ara_original.m.autotex_mixratio), sizeof(float));
-	arafile.read(reinterpret_cast<char*>(&ara_original.m.autotex_offset.x), sizeof(float));
-	arafile.read(reinterpret_cast<char*>(&ara_original.m.autotex_offset.y), sizeof(float));
+		string dummy_string = "";
+		arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
+		dummy_string.resize(sz);
+		arafile.read(&dummy_string[0], sz);
 
-	arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
-	ara_original.m.multitex_image.resize(sz);
-	arafile.read(&ara_original.m.multitex_image[0], sz);
+		float dummy_float = 0.0f; // Load deprecated 
+		arafile.read(reinterpret_cast<char*>(&dummy_float), sizeof(float));
+		arafile.read(reinterpret_cast<char*>(&dummy_float), sizeof(float));
+		arafile.read(reinterpret_cast<char*>(&dummy_float), sizeof(float));
+		arafile.read(reinterpret_cast<char*>(&dummy_float), sizeof(float));
 
-	arafile.read(reinterpret_cast<char*>(&ara_original.m.multitex_zoom), sizeof(float));
-	arafile.read(reinterpret_cast<char*>(&ara_original.m.multitex_mixratio), sizeof(float));
+		arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
+		dummy_string.resize(sz);
+		arafile.read(&dummy_string[0], sz);
 
-	ara_original.q.clear();
+		arafile.read(reinterpret_cast<char*>(&dummy_float), sizeof(float));
+		arafile.read(reinterpret_cast<char*>(&dummy_float), sizeof(float));
+
+		ara_original.m.orthotex_image = "";
+		ara_original.m.orthotex_zoom = 0.0f;
+		ara_original.m.orthotex_mixratio = 0.0f;
+		ara_original.m.orthotex_Zoffset = 0.0f;
+	}
+	else if (version == "1.01")
+	{
+		arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
+		ara_original.m.orthotex_image.resize(sz);
+		arafile.read(&ara_original.m.orthotex_image[0], sz);
+
+		arafile.read(reinterpret_cast<char*>(&ara_original.m.orthotex_zoom), sizeof(float));
+		arafile.read(reinterpret_cast<char*>(&ara_original.m.orthotex_mixratio), sizeof(float));
+		arafile.read(reinterpret_cast<char*>(&ara_original.m.orthotex_Zoffset), sizeof(float));
+	}
+
+	if ( additive == false ) // Loading normally from scratch, otherwise we're trying to accumulate geometry here.
+		ara_original.q.clear();
 
 	Quad q;
 
@@ -1783,7 +2052,33 @@ void loading_ara_file(string filename)
 				maxBound.z = q.v[j].z;
 		}
 
+		if (additive == true) // If we're accumulating ARAs, we just ignore the global ARA orthotex setting, because that's gonna look weird.
+		{
+			ara_original.m.orthotex_image = "";
+			ara_original.m.orthotex_zoom = 0.0f;
+			ara_original.m.orthotex_mixratio = 0.0f;
+			ara_original.m.orthotex_Zoffset = 0.0f;
+		}
+
 		coords3d col = { 1.0f, 1.0f, 1.0f }; // We default vertex color to "white"
+
+		if (additive == true)
+		{
+			q.v[0] = gl->transform(q.v[0], { -t.rotate.x, -t.rotate.y, -t.rotate.z });
+			q.v[1] = gl->transform(q.v[1], { -t.rotate.x, -t.rotate.y, -t.rotate.z });
+			q.v[2] = gl->transform(q.v[2], { -t.rotate.x, -t.rotate.y, -t.rotate.z });
+			q.v[3] = gl->transform(q.v[3], { -t.rotate.x, -t.rotate.y, -t.rotate.z });
+
+			q.v[0] = q.v[0] * t.scale.x;
+			q.v[1] = q.v[1] * t.scale.x;
+			q.v[2] = q.v[2] * t.scale.x;
+			q.v[3] = q.v[3] * t.scale.x;
+
+			q.v[0] = q.v[0] + t.translate;
+			q.v[1] = q.v[1] + t.translate;
+			q.v[2] = q.v[2] + t.translate;
+			q.v[3] = q.v[3] + t.translate;
+		}
 
 		if (ara_original.m.reverse_winding == false)
 			q.quad_handle = gl->loadimage_patch(q.tex_name, q.v[0], q.v[1], q.v[2], q.v[3], col, col, col, col, q.t[0], q.t[1], q.t[2], q.t[3], q.n[0], q.n[1], q.n[2], q.n[3], ara_original.m.fresnel, ara_original.m.envmap, ara_original.m.alpha);
@@ -1791,16 +2086,8 @@ void loading_ara_file(string filename)
 		else if (ara_original.m.reverse_winding == true)
 			q.quad_handle = gl->loadimage_patch_r(q.tex_name, q.v[0], q.v[1], q.v[2], q.v[3], col, col, col, col, q.t[0], q.t[1], q.t[2], q.t[3], q.n[0], q.n[1], q.n[2], q.n[3], ara_original.m.fresnel, ara_original.m.envmap, ara_original.m.alpha);
 
-		if (ara_original.m.autotex_image != "")
-		{
-			gl->autoteximage(q.quad_handle, ara_original.m.autotex_image, ara_original.m.autotex_zoom, ara_original.m.autotex_mixratio);
-			gl->scrollImageAutoTexture(q.quad_handle, ara_original.m.autotex_offset);
-		}
-
-		if (ara_original.m.multitex_image != "")
-		{
-			gl->multiteximage(q.quad_handle, ara_original.m.multitex_image, ara_original.m.multitex_zoom, ara_original.m.multitex_mixratio);
-		}
+		if (ara_original.m.orthotex_image != "")
+			gl->orthoteximage(q.quad_handle, ara_original.m.orthotex_image, ara_original.m.orthotex_zoom, ara_original.m.orthotex_mixratio, ara_original.m.orthotex_Zoffset);
 
 		gl->glassimage(q.quad_handle, 1.0);
 
@@ -1825,20 +2112,18 @@ void loading_ara_file(string filename)
 	fresnel_slider->value(ara_original.m.fresnel);
 	alpha_slider->value(ara_original.m.alpha);
 
-	mixratio_slider->value(ara_original.m.autotex_mixratio);
-	mt_mixratio_slider->value(ara_original.m.multitex_mixratio);
-	xoffset_counter->value(to_trimmedString(ara_original.m.autotex_offset.x).c_str());
-	yoffset_counter->value(to_trimmedString(ara_original.m.autotex_offset.y).c_str());
-	zoom_counter->value(to_trimmedString(ara_original.m.autotex_zoom).c_str());
-	mt_zoom_counter->value(to_trimmedString(ara_original.m.multitex_zoom).c_str());
+	mixratio_slider->value(ara_original.m.orthotex_mixratio);
+	zoffset_counter->value(to_trimmedString(ara_original.m.orthotex_Zoffset).c_str());
+	zoffset_roller->value(0.00);
+	zoom_counter->value(to_trimmedString(ara_original.m.orthotex_zoom).c_str());
 	
-	if (ara_original.m.autotex_image != "")
+	if (ara_original.m.orthotex_image != "")
 	{
 		int i = 1;
 		while (imgbrowser->text(i) != NULL)
 		{
 			string imageline = imgbrowser->text(i);
-			if (imageline == ara_original.m.autotex_image)
+			if (imageline == ara_original.m.orthotex_image)
 				break;
 			i++;
 		}
@@ -1852,26 +2137,6 @@ void loading_ara_file(string filename)
 		imgbrowser->value(1);
 	}
 
-	if (ara_original.m.multitex_image != "")
-	{
-		int i = 1;
-		while (multiimgbrowser->text(i) != NULL)
-		{
-			string imageline = multiimgbrowser->text(i);
-			if (imageline == ara_original.m.multitex_image)
-				break;
-			i++;
-		}
-
-		multiimgbrowser->display(i);
-		multiimgbrowser->value(i);
-	}
-	else
-	{
-		multiimgbrowser->display(1);
-		multiimgbrowser->value(1);
-	}
-
 	if (ara_original.m.reverse_winding == true)
 		winding_checkbox->value(1);
 	if (ara_original.m.reverse_winding == false)
@@ -1881,9 +2146,80 @@ void loading_ara_file(string filename)
 	string tb = "Dimensions: " + to_trimmedString(dims.x) + ", " + to_trimmedString(dims.y) + ", " + to_trimmedString(dims.z) + ", Spatial: min(" + to_trimmedString(minBound.x) + ", " + to_trimmedString(minBound.y) + ", " + to_trimmedString(minBound.z) + ") max(" + to_trimmedString(maxBound.x) + ", " + to_trimmedString(maxBound.y) + ", " + to_trimmedString(maxBound.z) + ")";
 	textbuff->text(tb.c_str());
 
-	global_transformObject();
+	if (additive == false) // Only refresh the view if this is a single file.
+	{
+		global_transformObject();
+		Fl::redraw();
+	}
+}
 
-	Fl::redraw();
+void saving_scn_as_ara_file(string filename)
+{
+	cout << "Saving SCN to ARA specification.\n";
+
+	ofstream SCNfile(filename, ios::out | ios::binary);
+	if (!SCNfile)
+	{
+		cout << "ARENA cannot for some reason save the ARA file.\n";
+		return;
+	}
+
+	if (S.size() > 0)
+	{
+		EmptyObject.index_type = 1; // Clear Main
+		EmptyObject.index = 0;
+		EmptyObject.isStatic = true;
+		gl->resetimagesto(EmptyObject);
+
+		ara_original.q.clear();
+		global_transformObject();
+
+		int totalQuads = 0;
+
+		for (int i = 0; i < S.size(); i++)
+		{
+			Transform t;
+			t.rotate = S[i].rotate;
+			t.scale.x = S[i].scale;
+			t.translate = S[i].translate;
+
+			//cout << "translate = " << t.translate.x << ", " << t.translate.y << ", " << t.translate.z << "\n";
+			//cout << "scale = " << t.scale.x << "\n";
+			//cout << "rotate = " << t.rotate.x << ", " << t.rotate.y << ", " << t.rotate.z << "\n";
+
+			string totalfile = S[i].object_path + S[i].object_file;
+
+			loading_ara_file(totalfile, true, t);
+			totalQuads = totalQuads + ara_original.quad_count;
+		}
+
+		ara_original.quad_count = totalQuads;
+		saving_ara_file(filename);
+
+		EmptyObject.index_type = 1; // Clear Main
+		EmptyObject.index = 0;
+		EmptyObject.isStatic = true;
+		gl->resetimagesto(EmptyObject);
+
+		ara_original.q.clear();
+		global_transformObject();
+
+		if (initial_ara != "")
+		{
+			Transform ot;
+			loading_ara_file(initial_ara, false, ot);
+		}
+
+		EmptyObject.index_type = 1; // Clear Main, to avoid the Object drawing with the Scene.
+		EmptyObject.index = 0;
+		EmptyObject.isStatic = true;
+		gl->resetimagesto(EmptyObject);
+
+		scnAfterLoadHash = getSceneHash(); // "AfterLoad" is a bit of a misnomer in this case, but it's required to align them.
+		scnCurrentHash = scnAfterLoadHash;
+	}
+	else
+		cout << "Scene is empty, nothing to save as ARA.\n";
 }
 
 class arena : public Fl_Double_Window
@@ -1901,34 +2237,24 @@ private:
 		if (file_chooser->filename() != "")
 		{
 			cout << "filename = " << file_chooser->filename() << "\n";
-			//static marker_type EmptyObject;
-			//EmptyObject.index_type = 1; // Main
-			//EmptyObject.index = 0;
-			//EmptyObject.isStatic = true;
-			//gl->resetimagesto(EmptyObject);
 			saving_scn_file(file_chooser->filename());
 		}
 		else
 			cout << "Cancelled from dialog.\n";
 	}
 
-	static void menu_save_pcn(Fl_Widget*, void*)
+	static void menu_save_scn_as_ara(Fl_Widget*, void*)
 	{
 		file_chooser = new Fl_Native_File_Chooser;
-		file_chooser->title("Save PCN");
+		file_chooser->title("Save SCN to ARA");
 		file_chooser->type(Fl_Native_File_Chooser::BROWSE_SAVE_FILE);
-		file_chooser->filter("PCN\t*.pcn");
+		file_chooser->filter("ARA\t*.ara");
 		file_chooser->show();
 
 		if (file_chooser->filename() != "")
 		{
 			cout << "filename = " << file_chooser->filename() << "\n";
-			//static marker_type EmptyObject;
-			//EmptyObject.index_type = 1; // Main
-			//EmptyObject.index = 0;
-			//EmptyObject.isStatic = true;
-			//gl->resetimagesto(EmptyObject);
-			saving_pcn_file(file_chooser->filename());
+			saving_scn_as_ara_file(file_chooser->filename());
 		}
 		else
 			cout << "Cancelled from dialog.\n";
@@ -1987,10 +2313,10 @@ private:
 		Fl::redraw();
 	}
 
-	static void menu_load_wavefront(Fl_Widget*, void*)
+	static void menu_import_wavefront(Fl_Widget*, void*)
 	{
 		file_chooser = new Fl_Native_File_Chooser;
-		file_chooser->title("Load Wavefront Object");
+		file_chooser->title("Import Wavefront Object");
 		file_chooser->type(Fl_Native_File_Chooser::BROWSE_MULTI_FILE);
 		file_chooser->filter("OBJ\t*.obj");
 		file_chooser->show();
@@ -2014,6 +2340,29 @@ private:
 		}
 		else
 			cout << "Cancelled from dialog.\n";
+	}
+
+	static void menu_export_wavefront(Fl_Widget*, void*)
+	{
+		file_chooser = new Fl_Native_File_Chooser;
+		file_chooser->title("Export to Wavefront");
+		file_chooser->type(Fl_Native_File_Chooser::BROWSE_SAVE_FILE);
+		file_chooser->filter("OBJ\t*.obj");
+		file_chooser->show();
+
+		if (file_chooser->filename() != "")
+		{
+			cout << "filename = " << file_chooser->filename() << "\n";
+			static marker_type EmptyObject;
+			EmptyObject.index_type = 1; // Main
+			EmptyObject.index = 0;
+			EmptyObject.isStatic = true;
+			gl->resetimagesto(EmptyObject);
+			exporting_obj_file(file_chooser->filename());
+		}
+		else
+			cout << "Cancelled from dialog.\n";
+
 	}
 
 	static void wantToSave_cb(Fl_Widget* widget, void* data)
@@ -2092,7 +2441,9 @@ private:
 			gl->pushShaders();
 			Fl::redraw();
 
-			loading_ara_file(file_chooser->filename());
+			Transform t;
+			initial_ara = file_chooser->filename(); // Save the existing ARA.
+			loading_ara_file(file_chooser->filename(), false, t);
 		}
 		else
 			cout << "Cancelled from dialog.\n";
@@ -2135,40 +2486,6 @@ private:
 	static void dummy(Fl_Widget*, void*)
 	{
 		cout << "Implement this.\n";
-		/*
-		int b = gl->loadHUDobject("assets/oil_building_button.ara");
-		gl->moveHUDobject(b, { 50,50, 0 });
-		gl->glassHUDobject(b, 1.0f);
-
-		b = gl->loadHUDobject("assets/oil_building_button.ara");
-		gl->moveHUDobject(b, { 50,120, 0 });
-		gl->glassHUDobject(b, 1.0f);
-		*/
-
-		int b = gl->loadobject("assets/3by3.ara");
-		gl->moveobject(b, { 0,0, 0 });
-		gl->glassobject(b, 1.0f);
-
-		b = gl->loadobject("assets/3by3.ara");
-		gl->moveobject(b, { 128,0, -5 });
-		gl->glassobject(b, 1.0f);
-
-		//gl->setDynamicmode(true);
-
-		float y = 0;
-		int d = gl->loadHUDimage_patch("white0", { 150, 50 + y ,0 }, { 200, 50 + y,0 }, { 200,100 + y,0 }, { 150,100 + y,0 }, { 1,1,1 }, { 1,1,1 }, { 1,1,1 }, { 1,1,1 }, { 0,0 }, { 0,0 }, { 0,0 }, { 0,0 }, { 0,0,-1 }, { 0,0,-1 }, { 0,0,-1 }, { 0,0,-1 }, 3.0f, 0.0f, 1.0f);
-		gl->moveHUDimage(d, { 32.0f, 0.0f, -1.0f });
-		gl->glassHUDimage(d, 1.0f);
-
-		y = 0;
-		for (int i = 0; i < 5; i++)
-		{
-			int d = gl->loadHUDimage_patch("icon_rail", { 150, 50 + y ,0 }, { 200, 50 + y,0 }, { 200,100 + y,0 }, { 150,100 + y,0 }, { 1,1,1 }, { 1,1,1 }, { 1,1,1 }, { 1,1,1 }, { 0,0 }, { 0,0 }, { 0,0 }, { 0,0 }, { 0,0,-1 }, { 0,0,-1 }, { 0,0,-1 }, { 0,0,-1 }, 3.0f, 0.0f, 1.0f);
-			gl->glassHUDimage(d, 0.5f);
-			y = y + 70;
-		}
-
-		//gl->setDynamicmode(false);
 	}
 
 	static void switchTab(Fl_Widget*, void*)
@@ -2260,9 +2577,15 @@ private:
 			m.fresnel = fresnel_slider->value();
 
 			if (light_facet_button->value() == 1)
+			{
 				m.faceted = true;
+				ara_transformed.m.faceted = true;
+			}
 			else if (light_average_button->value() == 1)
+			{
 				m.faceted = false;
+				ara_transformed.m.faceted = false;
+			}
 
 			if (winding_checkbox->value() == 1)
 				m.reverse_winding = true;
@@ -2271,17 +2594,18 @@ private:
 
 			if (imgbrowser->value() > 0) // Something was selected.
 			{
-				m.autotex_image = imgbrowser->text(imgbrowser->value());
-				m.autotex_offset = { atoi(xoffset_counter->value()), atoi(yoffset_counter->value()) };
-				m.autotex_zoom = stof(zoom_counter->value());
-				m.autotex_mixratio = mixratio_slider->value();
-			}
-			
-			if (multiimgbrowser->value() > 0) // Something was selected.
-			{
-				m.multitex_image = multiimgbrowser->text(multiimgbrowser->value());
-				m.multitex_zoom = stof(mt_zoom_counter->value());
-				m.multitex_mixratio = mt_mixratio_slider->value();
+				m.orthotex_image = imgbrowser->text(imgbrowser->value());
+
+				if (zoffset_roller->changed() != 0) // If roller changed value, over-write zoffset counter.
+				{
+					m.orthotex_Zoffset = zoffset_roller->value();
+					zoffset_counter->value(to_trimmedString(zoffset_roller->value()).c_str());
+				}
+				else
+					m.orthotex_Zoffset = atoi(zoffset_counter->value());
+
+				m.orthotex_zoom = stof(zoom_counter->value());
+				m.orthotex_mixratio = mixratio_slider->value();
 			}
 
 			ara_transformed.m = m;
@@ -2289,12 +2613,17 @@ private:
 
 			coords3d colr = { 1.0f, 1.0f, 1.0f };
 
+			Object ara_previous = ara_transformed; // Attempt to hang on to pre-calculated normals we don't store elsewhere.
 			ara_transformed.q.clear();
 
 			Quad q;
 
 			current_textures.clear();
 			replacement_browser->clear();
+
+			coords3d mds = gl->mouseDepth(); // collect this for the quad tex paint.
+			int mds_closest_i = -1; // Find the closest Quad to the mouse projection point.
+			float mds_closest_vertex = 100000.0f;
 
 			for (int i = 0 ; i < ara_original.quad_count ; i++)
 			{
@@ -2325,7 +2654,109 @@ private:
 				q.t[2] = ara_original.q[i].t[2];
 				q.t[3] = ara_original.q[i].t[3];
 
+				if (quadToggle_checkbox->value() == 1) // Quad Texture Paint
+				{
+					coords3d avg = { (q.v[0].x + q.v[1].x + q.v[2].x + q.v[3].x) / 4.0f,
+									 (q.v[0].y + q.v[1].y + q.v[2].y + q.v[3].y) / 4.0f,
+									 (q.v[0].z + q.v[1].z + q.v[2].z + q.v[3].z) / 4.0f };
+
+					float dist = gl->DistanceBetween3D(avg, mds);
+
+					if (dist < mds_closest_vertex)
+					{
+						mds_closest_vertex = dist;
+						mds_closest_i = i;
+					}
+				}
+
 				ara_transformed.q.emplace_back(q);
+			}
+
+			if (quadToggle_checkbox->value() == 1 && quadBrowser->value() > 0) // Quad Texture Paint
+			{
+				ara_transformed.q[mds_closest_i].tex_name = quadBrowser->text(quadBrowser->value()); // Temporary because it's only applied to the final Transformation.
+
+				if (quadRotate_slider->value() == 0)
+				{
+					point dims = gl->getimageDimensions(ara_original.q[mds_closest_i].quad_handle); // We fetch from "original" because apparently we never copied to "transform".
+					int pinch = quadPinch_spinner->value();
+
+					ara_transformed.q[mds_closest_i].t[0].x = pinch;
+					ara_transformed.q[mds_closest_i].t[0].y = pinch;
+
+					ara_transformed.q[mds_closest_i].t[1].x = -pinch;
+					ara_transformed.q[mds_closest_i].t[1].y = pinch;
+
+					ara_transformed.q[mds_closest_i].t[2].x = -pinch;
+					ara_transformed.q[mds_closest_i].t[2].y = -pinch;
+
+					ara_transformed.q[mds_closest_i].t[3].x = pinch;
+					ara_transformed.q[mds_closest_i].t[3].y = -pinch;
+				}
+				
+				else if (quadRotate_slider->value() == 90)
+				{
+					point dims = gl->getimageDimensions(ara_original.q[mds_closest_i].quad_handle); // We fetch from "original" because apparently we never copied to "transform".
+					int pinch = quadPinch_spinner->value();
+
+					ara_transformed.q[mds_closest_i].t[0].x = dims.x - pinch;
+					ara_transformed.q[mds_closest_i].t[0].y = pinch;
+
+					ara_transformed.q[mds_closest_i].t[1].x = -pinch;
+					ara_transformed.q[mds_closest_i].t[1].y = dims.y - pinch;
+
+					ara_transformed.q[mds_closest_i].t[2].x = -dims.x + pinch;
+					ara_transformed.q[mds_closest_i].t[2].y = -pinch;
+
+					ara_transformed.q[mds_closest_i].t[3].x = pinch;
+					ara_transformed.q[mds_closest_i].t[3].y = -dims.y + pinch;
+				}
+
+				else if (quadRotate_slider->value() == 180)
+				{
+					point dims = gl->getimageDimensions(ara_original.q[mds_closest_i].quad_handle); // We fetch from "original" because apparently we never copied to "transform".
+					int pinch = quadPinch_spinner->value();
+
+					ara_transformed.q[mds_closest_i].t[0].x = dims.x - pinch;
+					ara_transformed.q[mds_closest_i].t[0].y = dims.y - pinch;
+
+					ara_transformed.q[mds_closest_i].t[1].x = -dims.x + pinch;
+					ara_transformed.q[mds_closest_i].t[1].y = dims.y - pinch;
+
+					ara_transformed.q[mds_closest_i].t[2].x = -dims.x + pinch;
+					ara_transformed.q[mds_closest_i].t[2].y = -dims.y + pinch;
+
+					ara_transformed.q[mds_closest_i].t[3].x = dims.x - pinch;
+					ara_transformed.q[mds_closest_i].t[3].y = -dims.y + pinch;
+				}
+
+				else if (quadRotate_slider->value() == 270)
+				{
+					point dims = gl->getimageDimensions(ara_original.q[mds_closest_i].quad_handle); // We fetch from "original" because apparently we never copied to "transform".
+					int pinch = quadPinch_spinner->value();
+
+					ara_transformed.q[mds_closest_i].t[0].x = pinch;
+					ara_transformed.q[mds_closest_i].t[0].y = dims.y - pinch;
+
+					ara_transformed.q[mds_closest_i].t[1].x = -dims.x + pinch;
+					ara_transformed.q[mds_closest_i].t[1].y = pinch;
+
+					ara_transformed.q[mds_closest_i].t[2].x = -pinch;
+					ara_transformed.q[mds_closest_i].t[2].y = -dims.y + pinch;
+
+					ara_transformed.q[mds_closest_i].t[3].x = dims.x - pinch;
+					ara_transformed.q[mds_closest_i].t[3].y = -pinch;
+				}
+
+				bool mclick = gl->mouse_click(); // Maybe in future we stick this in the Timer, because this expires as you use it.
+				if (mclick == true) // Apply the texture.
+				{
+					ara_original.q[mds_closest_i].tex_name = quadBrowser->text(quadBrowser->value());
+					ara_original.q[mds_closest_i].t[0] = ara_transformed.q[mds_closest_i].t[0];
+					ara_original.q[mds_closest_i].t[1] = ara_transformed.q[mds_closest_i].t[1];
+					ara_original.q[mds_closest_i].t[2] = ara_transformed.q[mds_closest_i].t[2];
+					ara_original.q[mds_closest_i].t[3] = ara_transformed.q[mds_closest_i].t[3];
+				}
 			}
 
 			current_browser->clear();
@@ -2336,40 +2767,20 @@ private:
 			{
 				lastNormalsCalced = 1; // Average mode, so we don't need to calc again, if already done.
 				calc_quad_normals();
-
-				generate_unique_verts(); // Also collects quad normals and calculates normalized resultants
-
-				// Distribute resultants to all quads
-
-				for (int i = 0; i < ara_transformed.quad_count; i++) // Step through each quad.
-				{
-					for (int j = 0; j < 4; j++) // Check the four corners of the quad.
-					{
-						auto it = unique_verts.find(ara_transformed.q[i].v[j]);
-						if (it != unique_verts.end()) // Found one.
-						{
-							ara_original.q[i].n[j] = it->second;
-							ara_transformed.q[i].n[j] = it->second;
-						}
-						else
-							cout << "Couldn't find vertex in lookup! -Shouldn't happen.\n";
-					}
-				}
+				generate_average_normals();
 			}
 			else if (ara_transformed.m.faceted == true && lastNormalsCalced != 2) // ..either 0 or 1
 			{
 				lastNormalsCalced = 2; // Faceted.
 				calc_quad_normals();
 			}
-			else // If we don't generate new Normals, at least provide the ara_original ones to ara_transformed.
+			else
 			{
-				for (int i = 0; i < ara_original.q.size(); i++)
-				{
-					ara_transformed.q[i].quad_normal = ara_original.q[i].quad_normal;
-					
+				// Pass the normals as they are.
+
+				for (int i = 0; i < ara_original.quad_count; i++)
 					for (int j = 0; j < 4; j++)
-						ara_transformed.q[i].n[j] = ara_original.q[i].n[j];
-				}
+						ara_transformed.q[i].n[j] = ara_previous.q[i].n[j];
 			}
 
 			minBound = { 0.0f, 0.0f, 0.0f };
@@ -2435,37 +2846,40 @@ private:
 
 				gl->glassimage(handle, 1.0f);
 
-				if (m.autotex_image != "")
-				{
-					gl->autoteximage(handle, m.autotex_image, m.autotex_zoom, m.autotex_mixratio);
-					gl->scrollImageAutoTexture(handle, m.autotex_offset);
-				}
-
-				if (m.multitex_image != "")
-					gl->multiteximage(handle, m.multitex_image, m.multitex_zoom, m.multitex_mixratio);
+				if (m.orthotex_image != "")
+					gl->orthoteximage(handle, m.orthotex_image, m.orthotex_zoom, m.orthotex_mixratio, m.orthotex_Zoffset);
 			}
 
 			gl->suppressMissingImages(false);
 
 			if (originx_checkbox->value() == 1)
 			{
-				int xchecker = gl->loadobject("assets\/checker.ara");
-				gl->rotateobject(xchecker, { 90.0f, 90.0f, 0.0f });
-				gl->glassobject(xchecker, (float)origin_slider->value());
+				int xchecker = gl->loadobject("assets\/checker.ara"); // TODO don't keep -loading this!
+				if (xchecker != -1)
+				{
+					gl->rotateobject(xchecker, { 90.0f, 90.0f, 0.0f });
+					gl->glassobject(xchecker, (float)origin_slider->value());
+				}
 			}
 
 			if (originy_checkbox->value() == 1)
 			{
 				int ychecker = gl->loadobject("assets\/checker.ara");
-				gl->rotateobject(ychecker, { 0.0f, 90.0f, 0.0f });
-				gl->glassobject(ychecker, (float)origin_slider->value());
+				if (ychecker != -1)
+				{
+					gl->rotateobject(ychecker, { 0.0f, 90.0f, 0.0f });
+					gl->glassobject(ychecker, (float)origin_slider->value());
+				}
 			}
 
 			if (originz_checkbox->value() == 1)
 			{
 				int zchecker = gl->loadobject("assets\/checker.ara");
-				gl->rotateobject(zchecker, { 0.0f, 0.0f, 0.0f });
-				gl->glassobject(zchecker, (float)origin_slider->value());
+				if (zchecker != -1)
+				{
+					gl->rotateobject(zchecker, { 0.0f, 0.0f, 0.0f });
+					gl->glassobject(zchecker, (float)origin_slider->value());
+				}
 			}
 
 			coords3d dims = { maxBound.x - minBound.x, maxBound.y - minBound.y, maxBound.z - minBound.z };
@@ -2598,30 +3012,10 @@ private:
 		if (file_chooser->filename() != "")
 		{
 			string fn = file_chooser->filename();
-			string rfn; // File name
-			string rfp; // File path
-			bool foundFile = false;
+			string ffp; // Path
+			string ffn; // Name
 
-			for (int i = fn.size()-1; i > -1; i--) // Go backwards to find the slash
-			{
-				if ( fn[i] != '\\' && foundFile == false)
-					rfn = rfn + fn[i];
-				else
-				{
-					foundFile = true;
-					rfp = rfp + fn[i];
-				}
-			}
-
-			string ffn;
-
-			for (int i = rfn.size() - 1; i > -1; i--) // Reverse the filename again.
-				ffn = ffn + rfn[i];
-
-			string ffp;
-
-			for (int i = rfp.size() - 1; i > -1; i--) // Reverse the filepath again.
-				ffp = ffp + rfp[i];
+			getPathAndFilename(fn, ffp, ffn);
 
 			scene_browser->add(ffn.c_str());
 
@@ -2970,6 +3364,289 @@ private:
 		}
 	}
 
+	static void cubemap_browser_cb(Fl_Widget*, void*)
+	{
+		if (cubemap_browser->value() > 0)
+		{
+			cubemapInput->value(cubemap_browser->text(cubemap_browser->value()));
+
+			for (int i = 0; i < cubemapData.size(); i++)
+			{
+				if (cubemapData[i].name == cubemap_browser->text(cubemap_browser->value()))
+				{
+					gl->setupenvmap(cubemapData[i].path);
+					Fl::redraw();
+					Fl::check();
+				}
+			}
+		}
+	}
+
+	static void cubemap_cb(Fl_Widget*, void* p)
+	{
+		string input = cubemapInput->value();
+		bool found = false;
+
+		if (input != "") // Don't do anything with an empty input!
+		{
+			CubemapPair cmp;
+
+			// Find if the Input is a Browser entry.
+			for (int i = 0; i < cubemapData.size(); i++)
+			{
+				if (cubemapData[i].name == input)
+				{
+					// Found it in the Browser, copy it from there.
+					cmp = cubemapData[i];
+
+					found = true;
+				}
+			}
+
+			// Create a new cubemap folder by lowercasing and removing the spaces.
+			if (found == false)
+			{
+				cmp.name = input;
+				input.erase(std::remove(input.begin(), input.end(), ' '), input.end());
+				std::transform(input.begin(), input.end(), input.begin(), [](unsigned char c) { return std::tolower(c); });
+				cout << "lowercase and without spaces = " << input << "\n";
+				cmp.path = input;
+				cubemapData.push_back(cmp);
+				cubemap_browser->add(cmp.name.c_str());
+
+				// Now create the folder
+
+				filesystem::path dir("assets/cubemaps/" + cmp.path);
+				if (!filesystem::exists(dir))
+					filesystem::create_directory(dir);
+
+				// Update cubemaps_index.txt
+
+				ofstream updatefile;
+				updatefile.open("assets/cubemaps/cubemap_index.txt");
+				for (int i = 0; i < cubemapData.size(); i++)
+				{
+					updatefile << cubemapData[i].name << "\n";
+					updatefile << cubemapData[i].path << "\n";
+				}
+				updatefile.close();
+			}
+
+			// Get the cameras position.
+
+			cameraOn = false; // Stop the camera from being moved around.
+
+			persp = 90.0f;
+
+			coords3d _cam;
+			coords3d _look;
+			coords3d _ZCcam;
+			coords3d _ZClook;
+			gl->getCameras(_cam, _look, _ZCcam, _ZClook);
+
+			coords3d lookCM = _ZCcam;
+			lookCM = { lookCM.x, lookCM.y - 10.0f, lookCM.z };
+			cameraUP = { 0.0f, 0.0f, 1.0f };
+			gl->cameras(_cam, _look, _ZCcam, lookCM);
+			gl->takeCubemap("assets/cubemaps/" + cmp.path + "/env_p_y.dat");
+			Fl::redraw();
+			Fl::check();
+
+			lookCM = _ZCcam;
+			lookCM = { lookCM.x, lookCM.y + 10.0f, lookCM.z };
+			gl->cameras(_cam, _look, _ZCcam, lookCM);
+			cameraUP = { 0.0f, 0.0f, -1.0f };
+			gl->takeCubemap("assets/cubemaps/" + cmp.path + "/env_n_y.dat");
+			Fl::redraw();
+			Fl::check();
+
+			lookCM = _ZCcam;
+			lookCM = { lookCM.x - 10.0f, lookCM.y + 0.0001f, lookCM.z + 0.0001f };
+			cameraUP = { -1.0f, -1.0f, 0.0f };
+			gl->cameras(_cam, _look, _ZCcam, lookCM);
+			gl->takeCubemap("assets/cubemaps/" + cmp.path + "/env_p_x.dat");
+			Fl::redraw();
+			Fl::check();
+
+			lookCM = _ZCcam;
+			lookCM = { lookCM.x + 10.0f, lookCM.y, lookCM.z };
+			cameraUP = { -1.0f, -1.0f, 0.0f };
+			gl->cameras(_cam, _look, _ZCcam, lookCM);
+			gl->takeCubemap("assets/cubemaps/" + cmp.path + "/env_n_x.dat");
+			Fl::redraw();
+			Fl::check();
+
+			lookCM = _ZCcam;
+			lookCM = { lookCM.x, lookCM.y + 0.0001f, lookCM.z - 10.0f};
+			cameraUP = { 0.0f, 0.0f, -1.0f };
+			gl->cameras(_cam, _look, _ZCcam, lookCM);
+			gl->takeCubemap("assets/cubemaps/" + cmp.path + "/env_p_z.dat");
+			Fl::redraw();
+			Fl::check();
+
+			lookCM = _ZCcam;
+			lookCM = { lookCM.x, lookCM.y - 0.0001f, lookCM.z + 10.0f};
+			gl->cameras(_cam, _look, _ZCcam, lookCM);
+			gl->takeCubemap("assets/cubemaps/" + cmp.path + "/env_n_z.dat");
+			Fl::redraw();
+			Fl::check();
+
+			gl->setupenvmap(cmp.name); // Load this cubemap we just made.
+			persp = 45.0f; // Return to regular perspective.
+
+			gl->cameras(_cam, _look, _ZCcam, _ZClook); // Restore the camera.
+			Fl::redraw();
+			Fl::check();
+		}
+	}
+
+	static void delete_cubemap_cb(Fl_Widget*, void* p)
+	{
+		if (cubemap_browser->value() > 0) // Check the browser is pointing at something.
+		{
+			for (int i = 0; i < cubemapData.size(); i++)
+			{
+				if (cubemapData[i].name == cubemap_browser->text(cubemap_browser->value()))
+				{
+					// Delete from file system.
+					filesystem::remove_all("assets/cubemaps/" + cubemapData[i].path);
+
+					// Erase from vector.
+					cubemapData.erase(cubemapData.begin() + i);
+
+					// Update index file.
+					ofstream updatefile;
+					updatefile.open("assets/cubemaps/cubemap_index.txt");
+					for (int i = 0; i < cubemapData.size(); i++)
+					{
+						updatefile << cubemapData[i].name << "\n";
+						updatefile << cubemapData[i].path << "\n";
+					}
+					updatefile.close();
+
+					// Remove from browser
+					cubemap_browser->remove(i+1);
+
+					break;
+				}
+			}
+		}
+	}
+
+	static void importARAs(Fl_Widget*, void* p)
+	{
+		cout << "Importing!\n";
+
+		string source_dir = "C:\\Users\\cammy\\source\\repos\\von Myses Railway Set\\von Myses Railway Set\\assets\\ARAversion1\\";
+		string target_dir = "C:\\Users\\cammy\\source\\repos\\von Myses Railway Set\\von Myses Railway Set\\assets\\";
+
+		vector <string> import_list;
+		
+		import_list.push_back("arch.ara");
+		import_list.push_back("book.ara");
+		import_list.push_back("budget_button.ara");
+		import_list.push_back("building_button.ara");
+		import_list.push_back("bulb.ara");
+		import_list.push_back("cable.ara");
+		import_list.push_back("carpet.ara");
+		import_list.push_back("ceiling.ara");
+		import_list.push_back("chair.ara");
+		import_list.push_back("cupboard.ara");
+		import_list.push_back("cupboard_better.ara");
+		import_list.push_back("demolish_button.ara");
+		import_list.push_back("door.ara");
+		import_list.push_back("engine_car_button.ara");
+		import_list.push_back("engine_train.ara");
+		import_list.push_back("factory_building_button.ara");
+		import_list.push_back("factory_car_button.ara");
+		import_list.push_back("fireplace.ara");
+		import_list.push_back("fireset.ara");
+		import_list.push_back("floor.ara");
+		import_list.push_back("food_building_button.ara");
+		import_list.push_back("food_car_button.ara");
+		import_list.push_back("food_train.ara");
+		import_list.push_back("goods_train.ara");
+		import_list.push_back("house.ara");
+		import_list.push_back("housec0h0a.ara");
+		import_list.push_back("housec0h0i.ara");
+		import_list.push_back("housec0h1a.ara");
+		import_list.push_back("housec0h1i.ara");
+		import_list.push_back("housec0h2a.ara");
+		import_list.push_back("housec0h2i.ara");
+		import_list.push_back("housec0h3a.ara");
+		import_list.push_back("housec0h3i.ara");
+		import_list.push_back("housec1h0a.ara");
+		import_list.push_back("housec1h0i.ara");
+		import_list.push_back("housec1h1a.ara");
+		import_list.push_back("housec1h1i.ara");
+		import_list.push_back("housec1h2a.ara");
+		import_list.push_back("housec1h2i.ara");
+		import_list.push_back("housec1h3a.ara");
+		import_list.push_back("housec1h3i.ara");
+		import_list.push_back("housec2h0a.ara");
+		import_list.push_back("housec2h0i.ara");
+		import_list.push_back("housec2h1a.ara");
+		import_list.push_back("housec2h1i.ara");
+		import_list.push_back("housec2h2a.ara");
+		import_list.push_back("housec2h2i.ara");
+		import_list.push_back("housec2h3a.ara");
+		import_list.push_back("housec2h3i.ara");
+		import_list.push_back("lampshade.ara");
+		import_list.push_back("landscape1.ara");
+		import_list.push_back("lumberyard_building_button.ara");
+		import_list.push_back("lumber_car_button.ara");
+		import_list.push_back("mantle.ara");
+		import_list.push_back("metal_building_button.ara");
+		import_list.push_back("metal_car_button.ara");
+		import_list.push_back("mouse_blocked.ara");
+		import_list.push_back("mouse_normal.ara");
+		import_list.push_back("mouse_switch.ara");
+		import_list.push_back("oil_building_button.ara");
+		import_list.push_back("oil_car_button.ara");
+		import_list.push_back("oil_train.ara");
+		import_list.push_back("painting.ara");
+		import_list.push_back("passenger_car_button.ara");
+		import_list.push_back("passenger_train.ara");
+		import_list.push_back("pillars_original.ara");
+		import_list.push_back("railscape1.ara");
+		import_list.push_back("rail_button.ara");
+		import_list.push_back("shadow.ara");
+		import_list.push_back("shutters.ara");
+		import_list.push_back("sleeper.ara");
+		import_list.push_back("smoke0.ara");
+		import_list.push_back("smoke1.ara");
+		import_list.push_back("smoke2.ara");
+		import_list.push_back("survey_button.ara");
+		import_list.push_back("table.ara");
+		import_list.push_back("table_leg.ara");
+		import_list.push_back("table_surface.ara");
+		import_list.push_back("textDisplay.ara");
+		import_list.push_back("top_panel.ara");
+		import_list.push_back("townhall_l1.ara");
+		import_list.push_back("townpeg.ara");
+		import_list.push_back("train_button.ara");
+		import_list.push_back("tree_type0.ara");
+		import_list.push_back("tree_type1.ara");
+		import_list.push_back("tree_type2.ara");
+		import_list.push_back("tree_type3.ara");
+		import_list.push_back("UIwindow.ara");
+		import_list.push_back("wall.ara");
+		import_list.push_back("water_building_button.ara");
+		import_list.push_back("water_car_button.ara");
+		import_list.push_back("water_train.ara");
+		import_list.push_back("window.ara");
+		import_list.push_back("window_frame.ara");
+		import_list.push_back("window_wall.ara");
+
+		Transform t;
+
+		for (int i = 0; i < import_list.size(); i++)
+		{
+			loading_ara_file(source_dir + import_list[i], false, t);
+			saving_ara_file(target_dir + import_list[i]);
+		}
+	}
+
 	static void timer_cb(void*)
 	{
 		static float yaw = 270.0f;
@@ -2982,25 +3659,27 @@ private:
 		static coords3d ZCcameraFront = { 0.1f, -20, 0.1f };
 		static coords3d ZCcameraUp = { 0, 0, -1 };
 
+		static bool  resetCamera = true;
+
+		ipoint mxy_screen = gl->xymouse_screen();
+		ipoint mxy = gl->xymouse();
 		int k = gl->getKey();
+
+		//cout << "k = " << k << "\n";
+
+		if (quadToggle_checkbox->value() == 1 && cameraOn == false) // Run the Quad Texture apply in real-time, but not with the camera on.
+			transformObject(mtabs1, (void*)true);
 
 		if (cameraOn == true)
 		{
-			POINT cursorPos;
-			GetCursorPos(&cursorPos);
-			point m = { (float)cursorPos.x, (float)cursorPos.y };
-
-			//coords3d c3d = gl->mouseDepth();
-			//cout << "depth = " << c3d.x << ", " << c3d.y << ", " << c3d.z << "\n";
-
 			int k = gl->getKey();
 
 			if (obj_mode == true)
 			{
-				if (m.x != 640 || m.y != 360)
+				if (mxy_screen.x != 640 || mxy_screen.y != 410)
 				{
-					yaw = yaw - ((640.0f - m.x) * 0.10);
-					pitch = pitch - ((410.0f - m.y) * 0.10);
+					yaw = yaw - ((640.0f - mxy_screen.x) * 0.10); // 640.0f
+					pitch = pitch - ((410.0f - mxy_screen.y) * 0.10); //410.0f
 
 					if (pitch > 89.0f)
 						pitch = 89.0f;
@@ -3048,10 +3727,10 @@ private:
 			}
 			else if (obj_mode == false)
 			{
-				if (m.x != 640 || m.y != 360)
+				if (mxy_screen.x != 640 || mxy_screen.y != 410)
 				{
-					ZCyaw = ZCyaw - ((640.0f - m.x) * 0.10);
-					ZCpitch = ZCpitch - ((410.0f - m.y) * 0.10);
+					ZCyaw = ZCyaw - ((640.0f - mxy_screen.x) * 0.10);
+					ZCpitch = ZCpitch - ((410.0f - mxy_screen.y) * 0.10);
 
 					if (ZCpitch > 89.0f)
 						ZCpitch = 89.0f;
@@ -3101,6 +3780,8 @@ private:
 			gl->cameras(cameraPos, lookPos, ZCcameraPos, ZClookPos);
 			Fl::redraw();
 		}
+		else if (cameraOn == false)
+			resetCamera = true;
 
 		Fl::repeat_timeout(0.05, timer_cb);
 	}
@@ -3118,7 +3799,7 @@ public:
 		Fl::set_color(FL_SELECTION_COLOR, 200, 200, 200);
 
 		// OpenGL window
-		gl = new bluebush(5, 75, 1024, 575); // 1024, 575
+		gl = new bluebush(5, 75, 1022, 574);
 
 		Fl_PNG_Image* icon = new Fl_PNG_Image("assets/icon.png");
 		gl->default_icon(icon);
@@ -3127,16 +3808,18 @@ public:
 		EmptyScene = gl->getMarker_ZC();
 
 		menu = new Fl_Menu_Bar(0, 0, 1480, 25);
-		menu->add("File/New SCN Scene", FL_CTRL + 'n', menu_new_scn);
-		menu->add("File/Load SCN Scene", FL_CTRL + 'l', menu_load_scn);
-		menu->add("File/Save SCN Scene", FL_CTRL + 's', menu_save_scn);
-		menu->add("File/Save PCN Physics", FL_CTRL + 'p', menu_save_pcn);
-		menu->add("File/Load ARA Arena", FL_CTRL + 'a', menu_load_ara);
-		menu->add("File/Save ARA Arena", FL_CTRL + 'o', menu_save_ara);
-		menu->add("File/Load ICE Iceberg", FL_CTRL + 'i', menu_load_ice);
-		menu->add("File/Import Wavefront", FL_CTRL + 'w', menu_load_wavefront); // Attempt to import Wavefront. Add "Default Tex" to change white0.
-		menu->add("File/Exit ...", FL_CTRL + 'e', menu_quit);
-		menu->add("Test HUD", FL_CTRL + 'h', dummy);
+		
+		menu->add("Arena/Load ARA Arena", FL_CTRL + 'a', menu_load_ara);
+		menu->add("Arena/Save ARA Arena", FL_CTRL + 'c', menu_save_ara);
+		
+		menu->add("Scene/New SCN Scene", FL_CTRL + 'n', menu_new_scn);
+		menu->add("Scene/Load SCN Scene", FL_CTRL + 'l', menu_load_scn);
+		menu->add("Scene/Save SCN Scene", FL_CTRL + 's', menu_save_scn);
+		menu->add("Scene/Save SCN to ARA", FL_CTRL + 'p', menu_save_scn_as_ara);
+		
+		menu->add("Import/Load ICE Iceberg", FL_CTRL + 'i', menu_load_ice);
+		menu->add("Import/Import Wavefront", FL_CTRL + 'w', menu_import_wavefront); // Attempt to import Wavefront. Add "Default Tex" to change white0.
+		menu->add("Export/Export to Wavefront", FL_CTRL + 'e', menu_export_wavefront);
 
 		textbuff = new Fl_Text_Buffer();
 		bounds_display = new Fl_Text_Display(10, 650, 1480, 25);
@@ -3223,22 +3906,90 @@ public:
 						zscale_counter->color(FL_GRAY);
 						zscale_counter->value("1.00");
 
-						Fl_Button* centre_button = new Fl_Button(1140, 550, 100, 25, "Centre Object"); centre_button->color(88 + 1);
+						Fl_Button* centre_button = new Fl_Button(1140, 550, 100, 25, "Centre Object");
+						centre_button->color(88 + 1);
 						centre_button->callback(centreObject);
+
+						Fl_Button* import_button = new Fl_Button(1140, 580, 100, 25, "Import ARAs");
+						import_button->color(78 + 1);
+						import_button->callback(importARAs);
 					}
 					aaa->end();
 
-					Fl_Group* bbb = new Fl_Group(50, 75, 1430, 575, "Auto Textures"); // Paper design how the two autoTx and multiTx would look and maybe knock this into "AutoTex"
+					Fl_Group* qta = new Fl_Group(50, 75, 1430, 575, "Quad Texture");
+					{
+						Fl_Group* quadtex_group;
+						quadtex_group = new Fl_Group(1055, 100, 400, 545, "Paint Quad");
+						quadtex_group->box(FL_UP_FRAME);
+						quadtex_group->labeltype(FL_SHADOW_LABEL);
+						quadtex_group->end();
+
+						fl_register_images();
+
+						quadBrowser = new Fl_Hold_Browser(1070, 120, 370, 400);
+						quadBrowser->callback(transformObject, (void*)false);
+
+						string line;
+						ifstream manifest("assets\/atlas.manifest");
+
+						int lc = 1; // Line count in the Hold Browser.
+
+						if (manifest.is_open())
+						{
+							while (!manifest.eof())
+							{
+								std::getline(manifest, line);
+
+								if (line != "")
+								{
+									string pathimage = "DDS convert and Atlas\/" + line + ".png";
+									Fl_Shared_Image* pngimage = Fl_Shared_Image::get(pathimage.c_str());
+									pngimage->scale(32, 32, 1);
+
+									quadBrowser->add(line.c_str());
+									quadBrowser->icon(lc, pngimage);
+									lc++;
+								}
+								std::getline(manifest, line); // skip
+								std::getline(manifest, line); // skip
+								std::getline(manifest, line); // skip
+								std::getline(manifest, line); // skip
+							}
+						}
+						manifest.close();
+
+						quadPinch_spinner = new Fl_Spinner(1160, 565, 50, 25, "Pinch Texture");
+						quadPinch_spinner->align(FL_ALIGN_RIGHT);
+						quadPinch_spinner->callback(transformObject, (void*)false);
+						quadPinch_spinner->color(FL_GRAY);
+						quadPinch_spinner->value(1);
+						quadPinch_spinner->step(1);
+						quadPinch_spinner->minimum(-1000);
+						quadPinch_spinner->maximum(1000);
+
+						quadToggle_checkbox = new Fl_Check_Button (1160, 530, 25, 25, "Toggle");
+						quadToggle_checkbox->align(FL_ALIGN_RIGHT);
+						quadToggle_checkbox->callback(transformObject, (void*)false);
+
+						quadRotate_slider = new Fl_Value_Slider(1160, 600, 150, 20, "Rotate");
+						quadRotate_slider->type(FL_HORIZONTAL);
+						quadRotate_slider->minimum(0);
+						quadRotate_slider->maximum(270);
+						quadRotate_slider->step(90);
+				}
+					qta->end();
+
+					Fl_Group* bbb = new Fl_Group(50, 75, 1430, 575, "Ortho Textures"); // Paper design how the two autoTx and multiTx would look and maybe knock this into "orthotex"
 					{
 						fl_register_images();
 
-						Fl_Group* autotex_group;
-						autotex_group = new Fl_Group(1055, 100, 285, 275, "AutoTex");
-						autotex_group->box(FL_UP_FRAME);
-						autotex_group->labeltype(FL_SHADOW_LABEL);
-						autotex_group->end();
+						Fl_Group* orthotex_group;
+						orthotex_group = new Fl_Group(1055, 100, 400, 545, "Ortho Textures");
+						orthotex_group->box(FL_UP_FRAME);
+						orthotex_group->labeltype(FL_SHADOW_LABEL);
+						orthotex_group->end();
 
-						imgbrowser = new Fl_Hold_Browser(1070, 120, 250, 165);
+						imgbrowser = new Fl_Hold_Browser(1070, 120, 370, 400);
 						imgbrowser->callback(transformObject, (void*)false);
 
 						string line;
@@ -3270,77 +4021,29 @@ public:
 						}
 						manifest.close();
 
-						xoffset_counter = new Fl_Float_Input(1100, 300, 90, 25, "Xset");
-						xoffset_counter->callback(transformObject, (void*)false);
-						xoffset_counter->color(FL_GRAY);
-						xoffset_counter->value("0.00");
-
-						yoffset_counter = new Fl_Float_Input(1100, 330, 90, 25, "Yset");
-						yoffset_counter->callback(transformObject, (void*)false);
-						yoffset_counter->color(FL_GRAY);
-						yoffset_counter->value("0.00");
-
-						zoom_counter = new Fl_Float_Input(1240, 300, 90, 25, "Zoom");
+						zoom_counter = new Fl_Float_Input(1200, 530, 90, 25, "Zoom");
 						zoom_counter->callback(transformObject, (void*)false);
 						zoom_counter->color(FL_GRAY);
 						zoom_counter->value("0.00");
 
-						mixratio_slider = new Fl_Value_Slider(1200, 330, 130, 25, "Mix");
+						mixratio_slider = new Fl_Value_Slider(1160, 565, 130, 25, "Mix");
 						mixratio_slider->minimum(0.00);
 						mixratio_slider->maximum(1.00);
 						mixratio_slider->callback(transformObject, (void*)false);
 						mixratio_slider->type(FL_HORIZONTAL);
 
-						// MultiTex
+						zoffset_counter = new Fl_Float_Input(1200, 610, 90, 25, "Zset");
+						zoffset_counter->callback(transformObject, (void*)false);
+						zoffset_counter->color(FL_GRAY);
+						zoffset_counter->value("0.00");
 
-						Fl_Group* multitex_group;
-						multitex_group = new Fl_Group(1055, 400, 285, 245, "MultiTex");
-						multitex_group->box(FL_UP_FRAME);
-						multitex_group->labeltype(FL_SHADOW_LABEL);
-						multitex_group->end();
-
-						multiimgbrowser = new Fl_Hold_Browser(1070, 420, 250, 165);
-						multiimgbrowser->callback(transformObject, (void*)false);
-
-						ifstream manifest2("assets\/atlas.manifest");
-
-						lc = 1; // Line count in the Hold Browser.
-
-						if (manifest2.is_open())
-						{
-							while (!manifest2.eof())
-							{
-								std::getline(manifest2, line);
-
-								if (line != "")
-								{
-									string pathimage = "DDS convert and Atlas\/" + line + ".png";
-									Fl_Shared_Image* pngimage = Fl_Shared_Image::get(pathimage.c_str());
-									pngimage->scale(32, 32, 1);
-
-									multiimgbrowser->add(line.c_str());
-									multiimgbrowser->icon(lc, pngimage);
-									lc++;
-								}
-								std::getline(manifest2, line); // skip
-								std::getline(manifest2, line); // skip
-								std::getline(manifest2, line); // skip
-								std::getline(manifest2, line); // skip
-							}
-						}
-						manifest2.close();
-
-						mt_zoom_counter = new Fl_Float_Input(1110, 600, 80, 25, "Zoom");
-						mt_zoom_counter->callback(transformObject, (void*)false);
-						mt_zoom_counter->color(FL_GRAY);
-						mt_zoom_counter->value("0.00");
-
-						mt_mixratio_slider = new Fl_Value_Slider(1200, 600, 130, 25, "MtMix");
-						mt_mixratio_slider->minimum(0.00);
-						mt_mixratio_slider->maximum(1.00);
-						mt_mixratio_slider->callback(transformObject, (void*)false);
-						mt_mixratio_slider->type(FL_HORIZONTAL);
-
+						zoffset_roller = new Fl_Roller(1310, 530, 25, 95, "Zset");
+						zoffset_roller->callback(transformObject, (void*)false);
+						zoffset_roller->color(FL_GRAY);
+						zoffset_roller->value(0.00);
+						zoffset_roller->step(0.5);
+						zoffset_roller->minimum(-100);
+						zoffset_roller->maximum(100);
 					}
 					bbb->end();
 
@@ -3407,19 +4110,19 @@ public:
 					Fl_Group* ddd = new Fl_Group(50, 75, 1430, 575, "Wavefront Texture");
 					{
 						Fl_Group* wavetex_group;
-						wavetex_group = new Fl_Group(1055, 100, 285, 470, "Wavefront Texture");
+						wavetex_group = new Fl_Group(1055, 100, 400, 545, "Wavefront Texture");
 						wavetex_group->box(FL_UP_FRAME);
 						wavetex_group->labeltype(FL_SHADOW_LABEL);
 						wavetex_group->end();
 
-						wavefront_browser = new Fl_Hold_Browser(1070, 120, 250, 436);
+						wavefront_browser = new Fl_Hold_Browser(1070, 120, 370, 455);
 						wavefront_browser->callback(setWavefrontTexture_cb);
 
-						intex_checkbox = new Fl_Check_Button(1115, 575, 150, 35, "Internal TexCoords");
+						intex_checkbox = new Fl_Check_Button(1170, 575, 150, 35, "Internal TexCoords");
 						intex_checkbox->callback(intex_cb, (void*)false);
 						intex_checkbox->selection_color(FL_BLACK);
 
-						pinch_counter = new Fl_Float_Input(1205, 610, 45, 25, "Pinch Texture");
+						pinch_counter = new Fl_Float_Input(1260, 610, 45, 25, "Pinch Texture");
 						pinch_counter->callback(pinch_cb);
 						pinch_counter->color(FL_GRAY);
 						pinch_counter->value("1");
@@ -3662,8 +4365,78 @@ public:
 						scn_gblz_counter->callback(transformScene);
 						scn_gblz_counter->color(FL_GRAY);
 						scn_gblz_counter->value("0.00");
+
+						scn_shape_dropdown = new Fl_Choice(1200, 390, 125, 25, "");
+						scn_shape_dropdown->callback(transformScene);
+						scn_shape_dropdown->color(FL_GRAY);
+						scn_shape_dropdown->add("Cube");
+						scn_shape_dropdown->add("Sphere");
+						scn_shape_dropdown->add("Capsule");
+						scn_shape_dropdown->add("Cylinder");
+						scn_shape_dropdown->add("Cone");
+						scn_shape_dropdown->add("Plane");
+						scn_shape_dropdown->value(0);
+
+						scn_physics_checkbox = new Fl_Check_Button(1200, 420, 125, 25, "Collision View");
+						scn_physics_checkbox->callback(transformScene);
+						scn_physics_checkbox->selection_color(FL_BLACK);
 					}
 					aaa2->end();
+
+					Fl_Group* bbb2 = new Fl_Group(50, 75, 1430, 600, "Collision");
+					{
+
+					}
+					bbb2->end();
+
+					Fl_Group* ccc2 = new Fl_Group(50, 75, 1430, 600, "Cubemap");
+					{
+						Fl_Group* group1 = new Fl_Group(1055, 100, 385, 300, "Cubemaps");
+						group1->box(FL_UP_FRAME);
+						group1->labeltype(FL_SHADOW_LABEL);
+						group1->end();
+
+						cubemap_browser = new Fl_Hold_Browser(1070, 120, 356, 165);
+						cubemap_browser->callback(cubemap_browser_cb);
+						cubemap_browser->color(FL_GRAY);
+
+						string line;
+						ifstream cmmanifest("assets\/cubemaps\/cubemap_index.txt"); // load the cubemap_index.txt or something.
+
+						CubemapPair cbp;
+
+						if (cmmanifest.is_open())
+						{
+							while (!cmmanifest.eof())
+							{
+								std::getline(cmmanifest, line);
+
+								if (line != "")
+								{
+									cubemap_browser->add(line.c_str()); // figure out the parse here.
+									cbp.name = line;
+								}
+
+								std::getline(cmmanifest, line);
+								cbp.path = line;
+
+								if ( line != "") // Ignore the line ending, if there is one.
+									cubemapData.push_back(cbp);
+							}
+						}
+						cmmanifest.close();
+
+						scn_cubemap_button = new Fl_Button(1275, 300, 150, 25, "Create Cubemap");
+						scn_cubemap_button->callback(cubemap_cb);
+
+						scn_cubemap_delete_button = new Fl_Button(1275, 360, 150, 25, "Delete Cubemap");
+						scn_cubemap_delete_button->color(88 + 1);
+						scn_cubemap_delete_button->callback(delete_cubemap_cb);
+
+						cubemapInput = new Fl_Input(1115, 300, 150, 25, "Name:");
+						cubemapInput->color(FL_GRAY);
+					}
+					ccc2->end();
 				}
 				tabs2->end();
 			}

@@ -1,9 +1,9 @@
 ﻿/*
-	Bluebush 3D API 'Fuel' 1.9 Arena PRODUCTION
-	Property of Cameron King 2022
+	Bluebush 3D API 'Hollywood' 2.0 Arena PRODUCTION
+	Property of Cameron King 2023
 
 	Author: Cameron King
-	Date: 25th October 2022
+	Date: 12th June 2023
 
 */
 
@@ -31,6 +31,11 @@
 #include <FL/Fl_Double_Window.H>
 #include <FL/Fl_Gl_Window.H>
 #include <FL/gl.h>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize.h"
 
 using namespace std;
 
@@ -66,6 +71,13 @@ struct coords3d
 	float y = 0;
 	float z = 0;
 	coords3d(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
+
+	bool operator<(const coords3d& other) const // Map needs this.
+	{
+		if (x != other.x) return x < other.x;
+		if (y != other.y) return y < other.y;
+		return z < other.z;
+	}
 };
 
 struct quat
@@ -115,13 +127,10 @@ struct araMaterial
 	float alpha = 1.0f;
 	float fresnel = 0.0f;
 	float envmap = 0.0f;
-	string autotex_image = "";
-	ipoint autotex_offset = { 0, 0 };
-	float autotex_zoom = 1.0f;
-	float autotex_mixratio = 0.0f;
-	string multitex_image = "";
-	float multitex_zoom = 1.0f;
-	float multitex_mixratio = 0.0f;
+	string orthotex_image = "";
+	float orthotex_Zoffset = 0.0f;
+	float orthotex_zoom = 1.0f;
+	float orthotex_mixratio = 0.0f;
 	bool reverse_winding = false;
 };
 
@@ -130,6 +139,16 @@ struct araFormat
 	araQuad q;
 	int quad_count = 0;
 	araMaterial m;
+};
+
+struct metaFormat
+{
+	string metaName = "";
+	coords3d translate = {0.0f, 0.0f, 0.0f};
+	coords3d rotate = {0.0f, 0.0f, 0.0f};
+	float radius = 0.0f;
+	point halfExtents = { 0.0f, 0.0f };
+	int metaShape = -1; // 0 = cube, 1 = sphere, 2 = capsule, 3 = cylinder, 4 = cone
 };
 
 coords3d operator+(const coords3d a, const coords3d b) // Addition of coords3d pair
@@ -156,12 +175,10 @@ GLuint PAlocation;
 GLuint RAlocation;
 GLuint SXlocation;
 GLuint TDlocation;
-GLuint MXlocation;
-GLuint TXlocation;
+GLuint OTlocation;
 
 GLuint texlocation;
 GLuint envlocation;
-GLuint camlocation;
 
 GLuint atlastextureID;
 GLuint FBOtextureID;
@@ -169,6 +186,9 @@ GLuint ENVtextureID;
 
 int charpressd;
 unsigned int keyboard_buffer = -1;
+
+POINT global_mouse;
+HWND hwnd_window;
 float mousewheel_val = 0;
 
 int atlas_x[1024];	// Max 1024 images in atlas
@@ -200,7 +220,7 @@ float PARASCAX_HUD_mini[HUD_back_submit * 16];
 
 const int total_geometry_limit = main_geometry_limit + ZC_geometry_limit + HUD_geometry_limit;
 
-const int PARASCAX_limit = (total_geometry_limit * 4) * 24; // 4 verts x 24 comp PARASCAX (PA-RA-SX-TD-MX-TX). 4 * 6 = 24
+const int PARASCAX_limit = (total_geometry_limit * 4) * 20; // 4 verts x 24 comp PARASCAX (PA-RA-SX-TD-OT). 4 * 5 = 20
 
 const int vertnorm_array_limit = (total_geometry_limit * 4) * 3; // 4 verts, 3 XYZ
 const int texcolor_array_limit = (total_geometry_limit * 4) * 4; // 4 verts, 4 RGBA
@@ -241,6 +261,15 @@ float color_array[texcolor_array_limit]; // 4 comp
 coords3d camera, look, cameraZC, lookZC;
 
 bool wireframe_mode = false;
+
+bool screenshot = false;
+string screenshotName = "";
+
+static coords3d cameraUP = { 0,0,-1 };
+static float persp = 45.0f;
+
+vector<std::vector<metaFormat>> scnData(4, std::vector<metaFormat>(32));
+ipoint scnData_idx = { 0,0 };
 
 class bluebush : public Fl_Gl_Window
 {
@@ -317,15 +346,8 @@ private:
 	coords3d WTS_in[16];
 	coords3d WTS_out[16];
 
-	// This is a hack :-( to package MultiTex mix GLSL attribute with DisplacementMix mix attribute in a 1D single-component array.
-	float global_MTmix_main = 0.0f;
-	float global_displacementMix_main = 0.0f;
-	float global_MTmix_ZC = 0.0f;
-	float global_displacementMix_ZC = 0.0f;
-	float global_MTmix_HUD = 0.0f;
-	float global_displacementMix_HUD = 0.0f;
-
 	int global_key = -1;
+	bool global_mouse_click = false;
 
 	void printShaderInfoLog(GLuint obj)
 	{
@@ -543,8 +565,7 @@ private:
 		glBindAttribLocation(program, 10, "RA"); // gl_Normal collides
 		glBindAttribLocation(program, 11, "SX"); // gl_Color collides
 		glBindAttribLocation(program, 12, "TD");
-		glBindAttribLocation(program, 13, "MX");
-		glBindAttribLocation(program, 14, "TX");
+		glBindAttribLocation(program, 13, "OT");
 
 		glLinkProgram(program);
 		glUseProgram(program);
@@ -558,8 +579,7 @@ private:
 		RAlocation = glGetAttribLocation(program, "RA");
 		SXlocation = glGetAttribLocation(program, "SX");
 		TDlocation = glGetAttribLocation(program, "TD");
-		MXlocation = glGetAttribLocation(program, "MX");
-		TXlocation = glGetAttribLocation(program, "TX");
+		OTlocation = glGetAttribLocation(program, "OT");
 
 		glActiveTexture(GL_TEXTURE0);
 		texlocation = glGetUniformLocation(program, "tex0");
@@ -660,68 +680,6 @@ private:
 		glBufferData(GL_ARRAY_BUFFER, sizeof(att_PARASCAX), att_PARASCAX, GL_DYNAMIC_DRAW);
 
 		// Purposely leave att_PARASCAX bound.
-	}
-
-	void setupenvmap()
-	{
-		glActiveTexture(GL_TEXTURE2);
-		glGenTextures(1, &ENVtextureID);
-
-		glBindTexture(GL_TEXTURE_CUBE_MAP, ENVtextureID);
-
-		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-		glTexParameterf(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameterf(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-		vector <unsigned char> cube_image, buffer;
-		unsigned long width = 0;
-		unsigned long height = 0;
-
-		cube_image.clear();
-		buffer.clear();
-
-		loadPNG(buffer, "assets/env_p_x.dat");
-
-		int error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
-
-		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
-
-		cube_image.clear();
-		buffer.clear();
-		loadPNG(buffer, "assets/env_n_x.dat");
-		error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
-
-		glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_X, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
-
-		cube_image.clear();
-		buffer.clear();
-		loadPNG(buffer, "assets/env_p_y.dat");
-		error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
-
-		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Y, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
-
-		cube_image.clear();
-		buffer.clear();
-		loadPNG(buffer, "assets/env_n_y.dat");
-		error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
-
-		glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
-
-		cube_image.clear();
-		buffer.clear();
-		loadPNG(buffer, "assets/env_p_z.dat");
-		error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
-
-		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
-
-		cube_image.clear();
-		buffer.clear();
-		loadPNG(buffer, "assets/env_n_z.dat");
-		error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
-
-		glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
 	}
 
 	f_result modifyWorldToScreen(bool create, bool remove, bool view, int handle, coords3d worldpos)
@@ -868,26 +826,41 @@ private:
 			memcpy(PARASCAX_ZC_mini, &att_PARASCAX[mem_portion + mem_portion + mem_portion + mem_portion + mem_ZC], sizeof(PARASCAX_ZC_mini));
 			memcpy(PARASCAX_HUD_mini, &att_PARASCAX[mem_portion + mem_portion + mem_portion + mem_portion + mem_HUD], sizeof(PARASCAX_HUD_mini));
 
-			glBufferSubData(GL_ARRAY_BUFFER, XX_portion + XX_portion + XX_portion + XX_portion + XX_main, sizeof(PARASCAX_main_mini), PARASCAX_main_mini);	// MX Main
-			glBufferSubData(GL_ARRAY_BUFFER, XX_portion + XX_portion + XX_portion + XX_portion + XX_ZC, sizeof(PARASCAX_ZC_mini), PARASCAX_ZC_mini);		// MX ZC
-			glBufferSubData(GL_ARRAY_BUFFER, XX_portion + XX_portion + XX_portion + XX_portion + XX_HUD, sizeof(PARASCAX_HUD_mini), PARASCAX_HUD_mini);		// MX HUD
-
-			memcpy(PARASCAX_main_mini, &att_PARASCAX[mem_portion + mem_portion + mem_portion + mem_portion + mem_portion + mem_main], sizeof(PARASCAX_main_mini));
-			memcpy(PARASCAX_ZC_mini, &att_PARASCAX[mem_portion + mem_portion + mem_portion + mem_portion + mem_portion + mem_ZC], sizeof(PARASCAX_ZC_mini));
-			memcpy(PARASCAX_HUD_mini, &att_PARASCAX[mem_portion + mem_portion + mem_portion + mem_portion + mem_portion + mem_HUD], sizeof(PARASCAX_HUD_mini));
-
-			glBufferSubData(GL_ARRAY_BUFFER, XX_portion + XX_portion + XX_portion + XX_portion + XX_portion + XX_main, sizeof(PARASCAX_main_mini), PARASCAX_main_mini);	// TX Main
-			glBufferSubData(GL_ARRAY_BUFFER, XX_portion + XX_portion + XX_portion + XX_portion + XX_portion + XX_ZC, sizeof(PARASCAX_ZC_mini), PARASCAX_ZC_mini);		// TX ZC
-			glBufferSubData(GL_ARRAY_BUFFER, XX_portion + XX_portion + XX_portion + XX_portion + XX_portion + XX_HUD, sizeof(PARASCAX_HUD_mini), PARASCAX_HUD_mini);	// TX HUD
+			glBufferSubData(GL_ARRAY_BUFFER, XX_portion + XX_portion + XX_portion + XX_portion + XX_main, sizeof(PARASCAX_main_mini), PARASCAX_main_mini);	// OT Main
+			glBufferSubData(GL_ARRAY_BUFFER, XX_portion + XX_portion + XX_portion + XX_portion + XX_ZC, sizeof(PARASCAX_ZC_mini), PARASCAX_ZC_mini);		// OT ZC
+			glBufferSubData(GL_ARRAY_BUFFER, XX_portion + XX_portion + XX_portion + XX_portion + XX_HUD, sizeof(PARASCAX_HUD_mini), PARASCAX_HUD_mini);		// OT HUD
 		}
+	}
+
+	void saveFramebufferSquare(const string& fileName, ipoint resolution)
+	{
+		ipoint offset = { (resolution.x - resolution.y) / 2, 0};
+		ipoint crop = {resolution.y, resolution.y};
+
+		// Read the entire pixels from OpenGL
+		vector<unsigned char> buffer(((resolution.y) * (resolution.y)) * 3); // Assuming 3 components (RGB)
+		glReadPixels(offset.x, offset.y, crop.x, crop.y, GL_RGB, GL_UNSIGNED_BYTE, buffer.data());
+
+		// Resize the image
+		std::vector<unsigned char> resizedBuffer(256 * 256 * 3);
+		stbir_resize_uint8(buffer.data(), crop.x, crop.y, 0, resizedBuffer.data(), 256, 256, 0, 3);
+
+		// Flip the image vertically because OpenGL's origin is at the bottom-left corner
+		int stride = 256 * 3;
+		std::vector<unsigned char> flippedBuffer(stride * 256);
+
+		for (int y = 0 ; y < 256 ; y++)
+		{
+			memcpy(&flippedBuffer[stride * ((256 - 1) - y)], &resizedBuffer[stride * y], stride);
+		}
+
+		stbi_write_png(fileName.c_str(), 256, 256, 3, flippedBuffer.data(), stride);
 	}
 
 	void render(coords3d camera, coords3d look, coords3d cameraZC, coords3d lookZC)
 	{
 		static float HUDnear = 160;
 		static float HUDfar = -160;
-
-		static coords3d cameraUP = { 0,0,0 };
 
 		static GLint viewport[4];
 		static GLdouble modelview[16];
@@ -906,7 +879,7 @@ private:
 		t.b = cam_left;
 		t.c = look;
 
-		cameraUP = { 0.0f, 0.0f, -1.0f };//calc_triangle_normal(t);
+		//cameraUP = { 0.0f, 0.0f, -1.0f }; // Now done globally
 
 		if (wireframe_mode == true)
 			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
@@ -940,7 +913,10 @@ private:
 		{
 			glMatrixMode(GL_PROJECTION); // Perspective
 			glLoadIdentity();
-			gluPerspective(45.0, (GLfloat)xres / (GLfloat)yres, 0.1, 500.0); // 2020 settings were 0.01 -> 100.0
+			//float persp = 45.0f;
+			//if (screenshot == true)
+			//	persp = 90.0f;
+			gluPerspective(persp, (GLfloat)xres / (GLfloat)yres, 0.1, 500.0); // 2020 settings were 0.01 -> 100.0
 			glMatrixMode(GL_MODELVIEW);
 			glLoadIdentity();
 		}
@@ -978,7 +954,7 @@ private:
 			WTS_out[i] = { (float)pro_x, yres - (float)pro_y, 0.0f };
 		}
 
-		point mouse = { 0,0 };; // xymouse(); Apparently we just ignore the mouse for now.
+		ipoint mouse = { global_mouse.x, global_mouse.y };
 		winX = mouse.x;
 		winY = (float)viewport[3] - mouse.y;
 
@@ -993,13 +969,13 @@ private:
 
 		glMatrixMode(GL_PROJECTION);
 		glLoadIdentity();
-		gluPerspective(45.0, (GLfloat)xres / (GLfloat)yres, 0.01, 1000.0);
+		gluPerspective(persp, (GLfloat)xres / (GLfloat)yres, 0.01, 1000.0);
 		glMatrixMode(GL_MODELVIEW);
 		glLoadIdentity();
 
 		gluLookAt(cameraZC.x * 0.01, cameraZC.y * 0.01, cameraZC.z * 0.01,	// ZC (Z-cleared camera position)
 			lookZC.x * 0.01, lookZC.y * 0.01, lookZC.z * 0.01,
-			0.0, 0.0, -10.0);
+			cameraUP.x, cameraUP.y, cameraUP.z);
 
 		glLightfv(GL_LIGHT0, GL_POSITION, light_pos); // Re-define the light after the modelview transform by the camera
 
@@ -1020,6 +996,12 @@ private:
 		glDrawArrays(GL_QUADS, draw_HUD_lower, draw_HUD_upper); // 2,000 vertices (actually, 1996 (-4) (now 499 quads) we steal a HUD quad for the FBO to display! ;-) ) 
 
 		mousewheel_val = 0;	// avoid stale mousewheel value
+
+		if (screenshot == true)
+		{
+			screenshot = false;
+			saveFramebufferSquare(screenshotName, {xres, yres});
+		}
 	}
 
 public:
@@ -1098,6 +1080,74 @@ public:
 		orthoMode = state;
 	}
 
+	void takeCubemap( string filename)
+	{
+		screenshotName = filename;
+		screenshot = true;
+	}
+
+	void setupenvmap(string cmpath)
+	{
+		glActiveTexture(GL_TEXTURE2);
+		glGenTextures(1, &ENVtextureID);
+
+		glBindTexture(GL_TEXTURE_CUBE_MAP, ENVtextureID);
+
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+		glTexParameterf(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameterf(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+		vector <unsigned char> cube_image, buffer;
+		unsigned long width = 0;
+		unsigned long height = 0;
+
+		cube_image.clear();
+		buffer.clear();
+
+		loadPNG(buffer, "assets/cubemaps/" + cmpath + "/env_p_x.dat");
+
+		int error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
+
+		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
+
+		cube_image.clear();
+		buffer.clear();
+		loadPNG(buffer, "assets/cubemaps/" + cmpath + "/env_n_x.dat");
+		error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
+
+		glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_X, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
+
+		cube_image.clear();
+		buffer.clear();
+		loadPNG(buffer, "assets/cubemaps/" + cmpath + "/env_p_y.dat");
+		error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
+
+		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Y, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
+
+		cube_image.clear();
+		buffer.clear();
+		loadPNG(buffer, "assets/cubemaps/" + cmpath + "/env_n_y.dat");
+		error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
+
+		glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Y, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
+
+		cube_image.clear();
+		buffer.clear();
+		loadPNG(buffer, "assets/cubemaps/" + cmpath + "/env_p_z.dat");
+		error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
+
+		glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_Z, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
+
+		cube_image.clear();
+		buffer.clear();
+		loadPNG(buffer, "assets/cubemaps/" + cmpath + "/env_n_z.dat");
+		error = decodePNG(cube_image, width, height, buffer.empty() ? 0 : &buffer[0], (unsigned long)buffer.size(), true);
+
+		glTexImage2D(GL_TEXTURE_CUBE_MAP_NEGATIVE_Z, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, &cube_image[0]);
+	}
+
 	void reloadShaders( const char* vert_string, const char* frag_string )
 	{
 		glDetachShader(program, v);
@@ -1127,8 +1177,7 @@ public:
 		glBindAttribLocation(program, 10, "RA");
 		glBindAttribLocation(program, 11, "SX");
 		glBindAttribLocation(program, 12, "TD");
-		glBindAttribLocation(program, 13, "MX");
-		glBindAttribLocation(program, 14, "TX");
+		glBindAttribLocation(program, 13, "OT");
 
 		glLinkProgram(program);
 		glUseProgram(program);
@@ -1142,8 +1191,7 @@ public:
 		RAlocation = glGetAttribLocation(program, "RA");
 		SXlocation = glGetAttribLocation(program, "SX");
 		TDlocation = glGetAttribLocation(program, "TD");
-		MXlocation = glGetAttribLocation(program, "MX");
-		TXlocation = glGetAttribLocation(program, "TX");
+		OTlocation = glGetAttribLocation(program, "OT");
 
 		glActiveTexture(GL_TEXTURE0);
 		texlocation = glGetUniformLocation(program, "tex0");
@@ -1214,8 +1262,7 @@ public:
 				scaleimage(i, 0.0);
 				planeimage(i, { 0,0,-1 });
 				glassimage(i, 0.0);
-				autoteximage(i, "", 0.0f, 0.0f);
-				multiteximage(i, "", 0.0f, 0.0f);
+				orthoteximage(i, "", 0.0f, 0.0f, 0.0f);
 			}
 
 			int count = object_index - 1;
@@ -1240,8 +1287,7 @@ public:
 				scaleimage(i, 0.0);
 				planeimage(i, { 0,0,-1 });
 				glassimage(i, 0.0);
-				autoteximage(i, "", 0.0f, 0.0f);
-				multiteximage(i, "", 0.0f, 0.0f);
+				orthoteximage(i, "", 0.0f, 0.0f, 0.0f);
 			}
 
 			int count = object_index - 1;
@@ -1272,8 +1318,7 @@ public:
 				scaleZCimage(i, 0.0);
 				planeZCimage(i, { 0,0,-1 });
 				glassZCimage(i, 0.0);
-				autotexZCimage(i, "", 0.0f, 0.0f);
-				multitexZCimage(i, "", 0.0f, 0.0f);
+				orthotexZCimage(i, "", 0.0f, 0.0f, 0.0f);
 			}
 
 			int count = ZCobject_index - 1;
@@ -1298,8 +1343,7 @@ public:
 				scaleZCimage(i, 0.0);
 				planeZCimage(i, { 0,0,-1 });
 				glassZCimage(i, 0.0);
-				autotexZCimage(i, "", 0.0f, 0.0f);
-				multitexZCimage(i, "", 0.0f, 0.0f);
+				orthotexZCimage(i, "", 0.0f, 0.0f, 0.0f);
 			}
 
 			int count = ZCobject_index - 1;
@@ -1329,8 +1373,7 @@ public:
 				rotateHUDimage(i, { 0,0,0 });
 				scaleHUDimage(i, 0.0);
 				glassHUDimage(i, 0.0);
-				autotexHUDimage(i, "", 0.0f, 0.0f);
-				multitexHUDimage(i, "", 0.0f, 0.0f);
+				orthotexHUDimage(i, "", 0.0f, 0.0f, 0.0f);
 			}
 
 			int count = HUDobject_index - 1;
@@ -1354,8 +1397,7 @@ public:
 				rotateHUDimage(i, { 0,0,0 });
 				scaleHUDimage(i, 0.0);
 				glassHUDimage(i, 0.0);
-				autotexHUDimage(i, "", 0.0f, 0.0f);
-				multitexHUDimage(i, "", 0.0f, 0.0f);
+				orthotexHUDimage(i, "", 0.0f, 0.0f, 0.0f);
 			}
 
 			int count = HUDobject_index - 1;
@@ -1425,6 +1467,13 @@ public:
 			version.resize(sz);
 			arafile.read(&version[0], sz);
 
+			if (version != "1.01")
+			{
+				cout << "Legacy format in file " << filename << "\n";
+				object_mutex.unlock();
+				return -1;
+			}
+
 			arafile.read(reinterpret_cast<char*>(&ara.quad_count), sizeof(int));
 			object_i[object_index].count = ara.quad_count;
 			checkLimits(filename, 1, ara.quad_count);
@@ -1442,20 +1491,12 @@ public:
 			arafile.read(reinterpret_cast<char*>(&ara.m.alpha), sizeof(float));
 
 			arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
-			ara.m.autotex_image.resize(sz);
-			arafile.read(&ara.m.autotex_image[0], sz);
+			ara.m.orthotex_image.resize(sz);
+			arafile.read(&ara.m.orthotex_image[0], sz);
 
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_zoom), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_mixratio), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_offset.x), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_offset.y), sizeof(float));
-
-			arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
-			ara.m.multitex_image.resize(sz);
-			arafile.read(&ara.m.multitex_image[0], sz);
-
-			arafile.read(reinterpret_cast<char*>(&ara.m.multitex_zoom), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.multitex_mixratio), sizeof(float));
+			arafile.read(reinterpret_cast<char*>(&ara.m.orthotex_zoom), sizeof(float));
+			arafile.read(reinterpret_cast<char*>(&ara.m.orthotex_mixratio), sizeof(float));
+			arafile.read(reinterpret_cast<char*>(&ara.m.orthotex_Zoffset), sizeof(float));
 
 			for (int i = 0; i < ara.quad_count; i++)
 			{
@@ -1497,16 +1538,8 @@ public:
 					object_i[object_index].startimage = ara.q.quad_handle;
 				}
 
-				if (ara.m.autotex_image != "")
-				{
-					autoteximage(ara.q.quad_handle, ara.m.autotex_image, ara.m.autotex_zoom, ara.m.autotex_mixratio);
-					scrollImageAutoTexture(ara.q.quad_handle, ara.m.autotex_offset);
-				}
-
-				if (ara.m.multitex_image != "")
-				{
-					multiteximage(ara.q.quad_handle, ara.m.multitex_image, ara.m.multitex_zoom, ara.m.multitex_mixratio);
-				}
+				if (ara.m.orthotex_image != "")
+					orthoteximage(ara.q.quad_handle, ara.m.orthotex_image, ara.m.orthotex_zoom, ara.m.orthotex_mixratio, ara.m.orthotex_Zoffset);
 			}
 		}
 		else
@@ -1766,6 +1799,13 @@ public:
 			version.resize(sz);
 			arafile.read(&version[0], sz);
 
+			if (version != "1.01")
+			{
+				cout << "Legacy format in file " << filename << "\n";
+				object_mutex.unlock();
+				return -1;
+			}
+
 			arafile.read(reinterpret_cast<char*>(&ara.quad_count), sizeof(int));
 			ZCobject_i[ZCobject_index].count = ara.quad_count;
 			checkLimits(filename, 2, ara.quad_count);
@@ -1783,20 +1823,12 @@ public:
 			arafile.read(reinterpret_cast<char*>(&ara.m.alpha), sizeof(float));
 
 			arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
-			ara.m.autotex_image.resize(sz);
-			arafile.read(&ara.m.autotex_image[0], sz);
+			ara.m.orthotex_image.resize(sz);
+			arafile.read(&ara.m.orthotex_image[0], sz);
 
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_zoom), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_mixratio), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_offset.x), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_offset.y), sizeof(float));
-
-			arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
-			ara.m.multitex_image.resize(sz);
-			arafile.read(&ara.m.multitex_image[0], sz);
-
-			arafile.read(reinterpret_cast<char*>(&ara.m.multitex_zoom), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.multitex_mixratio), sizeof(float));
+			arafile.read(reinterpret_cast<char*>(&ara.m.orthotex_zoom), sizeof(float));
+			arafile.read(reinterpret_cast<char*>(&ara.m.orthotex_mixratio), sizeof(float));
+			arafile.read(reinterpret_cast<char*>(&ara.m.orthotex_Zoffset), sizeof(float));
 
 			for (int i = 0; i < ara.quad_count; i++)
 			{
@@ -1838,16 +1870,8 @@ public:
 					ZCobject_i[ZCobject_index].startimage = ara.q.quad_handle;
 				}
 
-				if (ara.m.autotex_image != "")
-				{
-					autotexZCimage(ara.q.quad_handle, ara.m.autotex_image, ara.m.autotex_zoom, ara.m.autotex_mixratio);
-					scrollZCImageAutoTexture(ara.q.quad_handle, ara.m.autotex_offset);
-				}
-
-				if (ara.m.multitex_image != "")
-				{
-					multitexZCimage(ara.q.quad_handle, ara.m.multitex_image, ara.m.multitex_zoom, ara.m.multitex_mixratio);
-				}
+				if (ara.m.orthotex_image != "")
+					orthotexZCimage(ara.q.quad_handle, ara.m.orthotex_image, ara.m.orthotex_zoom, ara.m.orthotex_mixratio, ara.m.orthotex_Zoffset);
 			}
 		}
 		else
@@ -2911,6 +2935,13 @@ public:
 			version.resize(sz);
 			arafile.read(&version[0], sz);
 
+			if (version != "1.01")
+			{
+				cout << "Legacy format in file " << filename << "\n";
+				object_mutex.unlock();
+				return -1;
+			}
+
 			arafile.read(reinterpret_cast<char*>(&ara.quad_count), sizeof(int));
 			HUDobject_i[HUDobject_index].count = ara.quad_count;
 			checkLimits(filename, 3, ara.quad_count);
@@ -2928,21 +2959,13 @@ public:
 			arafile.read(reinterpret_cast<char*>(&ara.m.alpha), sizeof(float));
 
 			arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
-			ara.m.autotex_image.resize(sz);
-			arafile.read(&ara.m.autotex_image[0], sz);
+			ara.m.orthotex_image.resize(sz);
+			arafile.read(&ara.m.orthotex_image[0], sz);
 
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_zoom), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_mixratio), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_offset.x), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.autotex_offset.y), sizeof(float));
-
-			arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
-			ara.m.multitex_image.resize(sz);
-			arafile.read(&ara.m.multitex_image[0], sz);
-
-			arafile.read(reinterpret_cast<char*>(&ara.m.multitex_zoom), sizeof(float));
-			arafile.read(reinterpret_cast<char*>(&ara.m.multitex_mixratio), sizeof(float));
-
+			arafile.read(reinterpret_cast<char*>(&ara.m.orthotex_zoom), sizeof(float));
+			arafile.read(reinterpret_cast<char*>(&ara.m.orthotex_mixratio), sizeof(float));
+			arafile.read(reinterpret_cast<char*>(&ara.m.orthotex_Zoffset), sizeof(float));
+			
 			for (int i = 0; i < ara.quad_count; i++)
 			{
 				arafile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
@@ -2983,16 +3006,8 @@ public:
 					HUDobject_i[HUDobject_index].startimage = ara.q.quad_handle;
 				}
 
-				if (ara.m.autotex_image != "")
-				{
-					autotexHUDimage(ara.q.quad_handle, ara.m.autotex_image, ara.m.autotex_zoom, ara.m.autotex_mixratio);
-					scrollHUDImageAutoTexture(ara.q.quad_handle, ara.m.autotex_offset);
-				}
-
-				if (ara.m.multitex_image != "")
-				{
-					multitexHUDimage(ara.q.quad_handle, ara.m.multitex_image, ara.m.multitex_zoom, ara.m.multitex_mixratio);
-				}
+				if (ara.m.orthotex_image != "")
+					orthotexHUDimage(ara.q.quad_handle, ara.m.orthotex_image, ara.m.orthotex_zoom, ara.m.orthotex_mixratio, ara.m.orthotex_Zoffset);
 			}
 		}
 		else
@@ -3020,37 +3035,60 @@ public:
 		version.resize(sz);
 		SCNfile.read(&version[0], sz);
 
-		int SCNsize = 0;
-		SCNfile.read(reinterpret_cast<char*>(&SCNsize), sizeof(int));
-
-		for (int i = 0; i < SCNsize; i++)
+		if (version == "1.01")
 		{
-			string obj_file;
-			SCNfile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
-			obj_file.resize(sz);
-			SCNfile.read(&obj_file[0], sz);
+			int SCNsize = 0;
+			SCNfile.read(reinterpret_cast<char*>(&SCNsize), sizeof(int));
 
-			coords3d translate = { 0.0f,0.0f,0.0f };
-			SCNfile.read(reinterpret_cast<char*>(&translate.x), sizeof(float));
-			SCNfile.read(reinterpret_cast<char*>(&translate.y), sizeof(float));
-			SCNfile.read(reinterpret_cast<char*>(&translate.z), sizeof(float));
+			for (int i = 0; i < SCNsize; i++)
+			{
+				string obj_file;
+				SCNfile.read(reinterpret_cast<char*>(&sz), sizeof(string::size_type));
+				obj_file.resize(sz);
+				SCNfile.read(&obj_file[0], sz);
 
-			coords3d rotate = { 0.0f,0.0f,0.0f };
-			SCNfile.read(reinterpret_cast<char*>(&rotate.x), sizeof(float));
-			SCNfile.read(reinterpret_cast<char*>(&rotate.y), sizeof(float));
-			SCNfile.read(reinterpret_cast<char*>(&rotate.z), sizeof(float));
+				coords3d translate = { 0.0f,0.0f,0.0f };
+				SCNfile.read(reinterpret_cast<char*>(&translate.x), sizeof(float));
+				SCNfile.read(reinterpret_cast<char*>(&translate.y), sizeof(float));
+				SCNfile.read(reinterpret_cast<char*>(&translate.z), sizeof(float));
 
-			float scale = 0.0f;
-			SCNfile.read(reinterpret_cast<char*>(&scale), sizeof(float));
+				coords3d rotate = { 0.0f,0.0f,0.0f };
+				SCNfile.read(reinterpret_cast<char*>(&rotate.x), sizeof(float));
+				SCNfile.read(reinterpret_cast<char*>(&rotate.y), sizeof(float));
+				SCNfile.read(reinterpret_cast<char*>(&rotate.z), sizeof(float));
 
-			translate = translate + position;
+				float scale = 0.0f;
+				SCNfile.read(reinterpret_cast<char*>(&scale), sizeof(float));
 
-			int o = loadobject("assets/" + obj_file);
-			moveobject(o, translate);
-			rotateobject(o, rotate);
-			scaleobject(o, scale);
-			glassobject(o, 1.0f); // This is a the one exception where we glass up, as we don't track handles for Scenes.
+				translate = translate + position;
+
+				int o = loadobject("assets/" + obj_file);
+				moveobject(o, translate);
+				rotateobject(o, rotate);
+				scaleobject(o, scale);
+				glassobject(o, 1.0f); // This is a the one exception where we glass up, as we don't track handles for Scenes.
+			}
+
+			int metaSize = 0;
+			SCNfile.read(reinterpret_cast<char*>(&metaSize), sizeof(int));
+
+			// ARA objects will not and should be link to meta-objects. Its not a practical associate and its a left over from the previous
+			// attempt to model it.
+
+			// for loop for metaSize
+
+			int metashape = 0;
+			SCNfile.read(reinterpret_cast<char*>(&metashape), sizeof(float));
+
+			point shapedims;
+			SCNfile.read(reinterpret_cast<char*>(&shapedims.x), sizeof(float));
+			SCNfile.read(reinterpret_cast<char*>(&shapedims.y), sizeof(float));
+
+			//scnData[10][10] = sf; // bullshit insert here.
+
 		}
+		else
+			cout << "Scene file version obsolete.\n";
 
 		SCNfile.close();
 	}
@@ -3422,89 +3460,26 @@ public:
 
 	void scrollImageTexture(int handle, int offset, point scroll)
 	{
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 0 + (texcolor_array_limit * 3)] = scroll.x; // TD.xy
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 1 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 4 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 5 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 8 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 9 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 12 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 13 + (texcolor_array_limit * 3)] = scroll.y;
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 0 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y}, 2048); // TD.x
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 4 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 8 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 12 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
 	}
 
 	void scrollZCImageTexture(int handle, int offset, point scroll)
 	{
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 0 + (texcolor_array_limit * 3)] = scroll.x; // TD.xy
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 1 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 4 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 5 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 8 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 9 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 12 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 13 + (texcolor_array_limit * 3)] = scroll.y;
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 0 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048); // TD.x
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 4 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 8 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 12 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
 	}
 
 	void scrollHUDImageTexture(int handle, int offset, point scroll)
 	{
-		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 0 + (texcolor_array_limit * 3)] = scroll.x; // TD.xy
-		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 1 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 4 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 5 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 8 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 9 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 12 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 13 + (texcolor_array_limit * 3)] = scroll.y;
-	}
-
-	void scrollImageAutoTexture(int handle, ipoint scroll)
-	{
-		att_PARASCAX[((handle - 1) * 16) + 3 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 7 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 11 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 15 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-	}
-
-	void scrollObjectAutoTexture(int handle, ipoint scroll)
-	{
-		for (int i = 0; i < object_i[handle - 1].count; i++)
-			scrollImageAutoTexture(object_i[handle - 1].startimage + i, scroll);
-	}
-
-	void scrollZCImageAutoTexture(int handle, ipoint scroll)
-	{
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 3 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 7 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 11 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 15 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-	}
-
-	void scrollZCObjectAutoTexture(int handle, ipoint scroll)
-	{
-		for (int i = 0; i < ZCobject_i[handle - 1].count; i++)
-			scrollZCImageAutoTexture(ZCobject_i[handle - 1].startimage + i, scroll);
-	}
-
-	void scrollHUDImageAutoTexture(int handle, ipoint scroll)
-	{
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 3 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 7 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 11 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 15 + (texcolor_array_limit * 5)] = twoDtoOneD(scroll, 2048);
-	}
-
-	void scrollHUDObjectAutoTexture(int handle, ipoint scroll)
-	{
-		for (int i = 0; i < HUDobject_i[handle - 1].count; i++)
-			scrollHUDImageAutoTexture(HUDobject_i[handle - 1].startimage + i, scroll);
+		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 0 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048); // TD.x
+		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 4 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 8 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((HUDobject_i[handle - 1].startimage + offset) - 1) * 16) + HUD_texcolor_offset + 12 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
 	}
 
 	void setDisplacementMap(string image) // See how it looks, maybe it needs texture trimmed -1 -1 +1 +1
@@ -3530,272 +3505,146 @@ public:
 
 	void scrollDisplacement(int handle, int offset, float mixratio, point scroll)
 	{
-		//att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 3 + texcolor_array_limit] = mixratio;
-		//att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 7 + texcolor_array_limit] = mixratio;
-		//att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 11 + texcolor_array_limit] = mixratio;
-		//att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 15 + texcolor_array_limit] = mixratio;
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 1 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048); // TD.y
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 2 + (texcolor_array_limit * 3)] = mixratio; // TD.z
 
-		global_displacementMix_main = mixratio;
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 5 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 6 + (texcolor_array_limit * 3)] = mixratio;
 
-		att_PARASCAX[((object_i[handle - 1].startimage - 1) * 16) + 0 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(global_MTmix_main * 100.0f), int(mixratio * 100.0f) }, 2048);
-		att_PARASCAX[((object_i[handle - 1].startimage - 1) * 16) + 4 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(global_MTmix_main * 100.0f), int(mixratio * 100.0f) }, 2048);
-		att_PARASCAX[((object_i[handle - 1].startimage - 1) * 16) + 8 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(global_MTmix_main * 100.0f), int(mixratio * 100.0f) }, 2048);
-		att_PARASCAX[((object_i[handle - 1].startimage - 1) * 16) + 12 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(global_MTmix_main * 100.0f), int(mixratio * 100.0f) }, 2048);
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 9 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 10 + (texcolor_array_limit * 3)] = mixratio;
 
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 2 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 3 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 6 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 7 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 10 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 11 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 14 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 15 + (texcolor_array_limit * 3)] = scroll.y;
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 13 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((object_i[handle - 1].startimage + offset) - 1) * 16) + 14 + (texcolor_array_limit * 3)] = mixratio;
 	}
 
 	void scrollZCDisplacement(int handle, int offset, float mixratio, point scroll)
 	{
-		//att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 3 + texcolor_array_limit] = mixratio;
-		//att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 7 + texcolor_array_limit] = mixratio;
-		//att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 11 + texcolor_array_limit] = mixratio;
-		//att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 15 + texcolor_array_limit] = mixratio;
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 1 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048); // TD.y
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 2 + (texcolor_array_limit * 3)] = mixratio;
 
-		global_displacementMix_ZC = mixratio;
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 5 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 6 + (texcolor_array_limit * 3)] = mixratio;
 
-		att_PARASCAX[((ZCobject_i[handle - 1].startimage - 1) * 16) + ZC_texcolor_offset + 0 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(global_MTmix_ZC * 100.0f), int(mixratio * 100.0f) }, 2048);
-		att_PARASCAX[((ZCobject_i[handle - 1].startimage - 1) * 16) + ZC_texcolor_offset + 4 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(global_MTmix_ZC * 100.0f), int(mixratio * 100.0f) }, 2048);
-		att_PARASCAX[((ZCobject_i[handle - 1].startimage - 1) * 16) + ZC_texcolor_offset + 8 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(global_MTmix_ZC * 100.0f), int(mixratio * 100.0f) }, 2048);
-		att_PARASCAX[((ZCobject_i[handle - 1].startimage - 1) * 16) + ZC_texcolor_offset + 12 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(global_MTmix_ZC * 100.0f), int(mixratio * 100.0f) }, 2048);
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 9 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 10 + (texcolor_array_limit * 3)] = mixratio;
 
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 2 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 3 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 6 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 7 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 10 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 11 + (texcolor_array_limit * 3)] = scroll.y;
-
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 14 + (texcolor_array_limit * 3)] = scroll.x;
-		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 15 + (texcolor_array_limit * 3)] = scroll.y;
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 13 + (texcolor_array_limit * 3)] = twoDtoOneD({ (int)scroll.x, (int)scroll.y }, 2048);
+		att_PARASCAX[(((ZCobject_i[handle - 1].startimage + offset) - 1) * 16) + ZC_texcolor_offset + 14 + (texcolor_array_limit * 3)] = mixratio;
 	}
 
-	void autoteximage(int handle, string image, float zoom, float mixratio)
+	void orthoteximage (int handle, string image, int zoom, float mixratio, int Zoffset)
 	{
 		ipoint pos;
 		ipoint xysize;
 		ipoint midpoint;
 
 		gettextureDimensions(image, pos, xysize);
+		xysize = { xysize.x / 2, xysize.y / 2 }; // HalfExtents
 
-		midpoint = { (int)(pos.x + (xysize.x * 0.5f)), (int)(pos.y + (xysize.y * 0.5f)) };
+		midpoint = { (int)(pos.x + xysize.x), (int)(pos.y + xysize.y) };
 
-		att_PARASCAX[((handle - 1) * 16) + 0 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048); // TX.xyz
-		att_PARASCAX[((handle - 1) * 16) + 1 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 2 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048); // Half-Extents
+		att_PARASCAX[((handle - 1) * 16) + 0 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + 1 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + 2 + (texcolor_array_limit * 4)] = twoDtoOneD({Zoffset, zoom}, 2048);
+		att_PARASCAX[((handle - 1) * 16) + 3 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 
-		att_PARASCAX[((handle - 1) * 16) + 4 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 5 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 6 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + 4 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + 5 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + 6 + (texcolor_array_limit * 4)] = twoDtoOneD({ Zoffset, zoom }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + 7 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 
-		att_PARASCAX[((handle - 1) * 16) + 8 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 9 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 10 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + 8 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + 9 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + 10 + (texcolor_array_limit * 4)] = twoDtoOneD({ Zoffset, zoom }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + 11 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 
-		att_PARASCAX[((handle - 1) * 16) + 12 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 13 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 14 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + 12 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + 13 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + 14 + (texcolor_array_limit * 4)] = twoDtoOneD({ Zoffset, zoom }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + 15 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 	}
 
-	void autotexobject(int handle, string image, float zoom, float mixratio)
+	void orthotexobject(int handle, string image, int zoom, float mixratio, int Zoffset)
 	{
 		for (int i = 0; i < object_i[handle - 1].count; i++)
-			autoteximage(object_i[handle - 1].startimage + i, image, zoom, mixratio);
+			orthoteximage(object_i[handle - 1].startimage + i, image, zoom, mixratio, Zoffset);
 	}
 
-	void autotexZCimage(int handle, string image, float zoom, float mixratio)
+	void orthotexZCimage(int handle, string image, int zoom, float mixratio, int Zoffset)
 	{
 		ipoint pos;
 		ipoint xysize;
 		ipoint midpoint;
 
 		gettextureDimensions(image, pos, xysize);
+		xysize = { xysize.x / 2, xysize.y / 2 }; // HalfExtents
 
-		midpoint = { (int)(pos.x + (xysize.x * 0.5f)), (int)(pos.y + (xysize.y * 0.5f)) };
+		midpoint = { (int)(pos.x + xysize.x), (int)(pos.y + xysize.y) };
 
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 0 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 1 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 2 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048); // Half-Extents
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 0 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 1 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 2 + (texcolor_array_limit * 4)] = twoDtoOneD({ Zoffset, zoom }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 3 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 4 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 5 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 6 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 4 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 5 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 6 + (texcolor_array_limit * 4)] = twoDtoOneD({ Zoffset, zoom }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 7 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 8 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 9 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 10 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 8 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 9 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 10 + (texcolor_array_limit * 4)] = twoDtoOneD({ Zoffset, zoom }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 11 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 12 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 13 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 14 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 12 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 13 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 14 + (texcolor_array_limit * 4)] = twoDtoOneD({ Zoffset, zoom }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 15 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 	}
 
-	void autotexZCobject(int handle, string image, float zoom, float mixratio)
+	void orthotexZCobject(int handle, string image, int zoom, float mixratio, int Zoffset)
 	{
 		for (int i = 0; i < ZCobject_i[handle - 1].count; i++)
-			autotexZCimage(ZCobject_i[handle - 1].startimage + i, image, zoom, mixratio);
+			orthotexZCimage(ZCobject_i[handle - 1].startimage + i, image, zoom, mixratio, Zoffset);
 	}
 
-	void autotexHUDimage(int handle, string image, float zoom, float mixratio)
+	void orthotexHUDimage(int handle, string image, int zoom, float mixratio, int Zoffset)
 	{
 		ipoint pos;
 		ipoint xysize;
 		ipoint midpoint;
 
 		gettextureDimensions(image, pos, xysize);
+		xysize = { xysize.x / 2, xysize.y / 2 }; // HalfExtents
 
-		midpoint = { (int)(pos.x + (xysize.x * 0.5f)), (int)(pos.y + (xysize.y * 0.5f)) };
+		midpoint = { (int)(pos.x + xysize.x), (int)(pos.y + xysize.y) };
 
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 0 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 1 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 2 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048); // Half-Extents
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 0 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 1 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 2 + (texcolor_array_limit * 4)] = twoDtoOneD({ Zoffset, zoom }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 3 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 4 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 5 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 6 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 4 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 5 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 6 + (texcolor_array_limit * 4)] = twoDtoOneD({ Zoffset, zoom }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 7 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 8 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 9 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 10 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 8 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 9 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 10 + (texcolor_array_limit * 4)] = twoDtoOneD({ Zoffset, zoom }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 11 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 12 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(mixratio * 100.0f), int(zoom) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 13 + (texcolor_array_limit * 5)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 14 + (texcolor_array_limit * 5)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 12 + (texcolor_array_limit * 4)] = mixratio;
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 13 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 14 + (texcolor_array_limit * 4)] = twoDtoOneD({ Zoffset, zoom }, 2048);
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 15 + (texcolor_array_limit * 4)] = twoDtoOneD(xysize, 2048);
 	}
 
-	void autotexHUDobject(int handle, string image, float zoom, float mixratio)
+	void orthotexHUDobject(int handle, string image, int zoom, float mixratio, int Zoffset)
 	{
 		for (int i = 0; i < HUDobject_i[handle - 1].count; i++)
-			autotexHUDimage(HUDobject_i[handle - 1].startimage + i, image, zoom, mixratio);
-	}
-
-	void multiteximage (int handle, string image, float zoom, float mixratio)
-	{
-		ipoint pos;
-		ipoint xysize;
-		ipoint midpoint;
-
-		gettextureDimensions(image, pos, xysize);
-
-		midpoint = { (int)(pos.x + (xysize.x * 0.5f)), (int)(pos.y + (xysize.y * 0.5f)) };
-
-		global_MTmix_main = mixratio;
-
-		att_PARASCAX[((handle - 1) * 16) + 0 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_main * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 1 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + 2 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 3 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048); // Half-Extents
-
-		att_PARASCAX[((handle - 1) * 16) + 4 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_main * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 5 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + 6 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 7 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
-
-		att_PARASCAX[((handle - 1) * 16) + 8 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_main * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 9 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + 10 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 11 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
-
-		att_PARASCAX[((handle - 1) * 16) + 12 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_main * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 13 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + 14 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + 15 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
-	}
-
-	void multitexobject(int handle, string image, float zoom, float mixratio)
-	{
-		for (int i = 0; i < object_i[handle - 1].count; i++)
-			multiteximage(object_i[handle - 1].startimage + i, image, zoom, mixratio);
-	}
-
-	void multitexZCimage(int handle, string image, float zoom, float mixratio)
-	{
-		ipoint pos;
-		ipoint xysize;
-		ipoint midpoint;
-
-		gettextureDimensions(image, pos, xysize);
-
-		midpoint = { (int)(pos.x + (xysize.x * 0.5f)), (int)(pos.y + (xysize.y * 0.5f)) };
-
-		global_MTmix_ZC = mixratio;
-
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 0 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_ZC * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 1 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 2 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 3 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
-
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 4 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_ZC * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 5 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 6 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 7 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
-
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 8 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_ZC * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 9 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 10 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 11 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
-
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 12 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_ZC * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 13 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 14 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 15 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
-	}
-
-	void multitexZCobject(int handle, string image, float zoom, float mixratio)
-	{
-		for (int i = 0; i < ZCobject_i[handle - 1].count; i++)
-			multitexZCimage(ZCobject_i[handle - 1].startimage + i, image, zoom, mixratio);
-	}
-
-	void multitexHUDimage(int handle, string image, float zoom, float mixratio)
-	{
-		ipoint pos;
-		ipoint xysize;
-		ipoint midpoint;
-
-		gettextureDimensions(image, pos, xysize);
-
-		midpoint = { (int)(pos.x + (xysize.x * 0.5f)), (int)(pos.y + (xysize.y * 0.5f)) };
-
-		global_MTmix_HUD = mixratio;
-
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 0 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_HUD * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 1 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 2 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 3 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
-
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 4 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_HUD * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 5 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 6 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 7 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
-
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 8 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_HUD * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 9 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 10 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 11 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
-
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 12 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(mixratio * 100.0f), int(global_displacementMix_HUD * 100.0f) }, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 13 + (texcolor_array_limit * 4)] = zoom;
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 14 + (texcolor_array_limit * 4)] = twoDtoOneD(midpoint, 2048);
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 15 + (texcolor_array_limit * 4)] = twoDtoOneD({ int(xysize.x * 0.5f), int(xysize.y * 0.5f) }, 2048);
-	}
-
-	void multitexHUDobject(int handle, string image, float zoom, float mixratio)
-	{
-		for (int i = 0; i < HUDobject_i[handle - 1].count; i++)
-			multitexHUDimage(HUDobject_i[handle - 1].startimage + i, image, zoom, mixratio);
+			orthotexHUDimage(HUDobject_i[handle - 1].startimage + i, image, zoom, mixratio, Zoffset);
 	}
 
 	int loadHUDimage_patch(string filename, coords3d a, coords3d b, coords3d c, coords3d d, coords3d col_a, coords3d col_b, coords3d col_c, coords3d col_d, ipoint ta, ipoint tb, ipoint tc, ipoint td, coords3d na, coords3d nb, coords3d nc, coords3d nd, float fresnel, float envmap, float alpha)
@@ -4312,7 +4161,7 @@ public:
 		att_PARASCAX[((handle - 1) * 16) + 0 + texcolor_array_limit] = q.x;
 		att_PARASCAX[((handle - 1) * 16) + 1 + texcolor_array_limit] = q.y;
 		att_PARASCAX[((handle - 1) * 16) + 2 + texcolor_array_limit] = q.z;
-		att_PARASCAX[((handle - 1) * 16) + 3 + texcolor_array_limit] = q.s; // We use MX.w, because it was spare.
+		att_PARASCAX[((handle - 1) * 16) + 3 + texcolor_array_limit] = q.s;
 
 		att_PARASCAX[((handle - 1) * 16) + 4 + texcolor_array_limit] = q.x;
 		att_PARASCAX[((handle - 1) * 16) + 5 + texcolor_array_limit] = q.y;
@@ -4335,7 +4184,7 @@ public:
 		att_PARASCAX[((handle - 1) * 16) + 0 + texcolor_array_limit] = angle.x;
 		att_PARASCAX[((handle - 1) * 16) + 1 + texcolor_array_limit] = angle.y;
 		att_PARASCAX[((handle - 1) * 16) + 2 + texcolor_array_limit] = angle.z;
-		att_PARASCAX[((handle - 1) * 16) + 3 + texcolor_array_limit] = angle.s; // We use MX.w, because it was spare.
+		att_PARASCAX[((handle - 1) * 16) + 3 + texcolor_array_limit] = angle.s;
 
 		att_PARASCAX[((handle - 1) * 16) + 4 + texcolor_array_limit] = angle.x;
 		att_PARASCAX[((handle - 1) * 16) + 5 + texcolor_array_limit] = angle.y;
@@ -4403,7 +4252,7 @@ public:
 		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 0 + texcolor_array_limit] = angle.x;
 		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 1 + texcolor_array_limit] = angle.y;
 		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 2 + texcolor_array_limit] = angle.z;
-		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 3 + texcolor_array_limit] = angle.s; // We use MX.w, because it was spare.
+		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 3 + texcolor_array_limit] = angle.s;
 
 		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 4 + texcolor_array_limit] = angle.x;
 		att_PARASCAX[((handle - 1) * 16) + ZC_texcolor_offset + 5 + texcolor_array_limit] = angle.y;
@@ -4482,7 +4331,7 @@ public:
 		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 0 + texcolor_array_limit] = angle.x;
 		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 1 + texcolor_array_limit] = angle.y;
 		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 2 + texcolor_array_limit] = angle.z;
-		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 3 + texcolor_array_limit] = angle.s; // We use MX.w, because it was spare.
+		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 3 + texcolor_array_limit] = angle.s;
 
 		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 4 + texcolor_array_limit] = angle.x;
 		att_PARASCAX[((handle - 1) * 16) + HUD_texcolor_offset + 5 + texcolor_array_limit] = angle.y;
@@ -5646,11 +5495,12 @@ public:
 
 			glDisable(GL_LIGHTING);
 			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+			glPixelStorei(GL_PACK_ALIGNMENT, 1); // This turns out to prevent glReadPixels from crashing with any non-zero offset! Default is 4!
 			glClear(GL_ACCUM_BUFFER_BIT);
 
 			setuplight();
 			setupvbo();
-			setupenvmap();
+			setupenvmap("default");
 			loadatlas();
 			setupshaders();
 
@@ -5697,11 +5547,8 @@ public:
 			glEnableVertexAttribArray(TDlocation);
 			glVertexAttribPointer(TDlocation, 4, GL_FLOAT, GL_FALSE, 0, BUFFER_OFFSET((texcolor_array_limit * 3) * sizeof(GLfloat))); // 4 comp per vertex, 7500 quads x 4 = 30,000
 
-			glEnableVertexAttribArray(MXlocation);
-			glVertexAttribPointer(MXlocation, 4, GL_FLOAT, GL_FALSE, 0, BUFFER_OFFSET((texcolor_array_limit * 4) * sizeof(GLfloat))); // 4 comp per vertex, 7500 quads x 4 = 30,000
-
-			glEnableVertexAttribArray(TXlocation);
-			glVertexAttribPointer(TXlocation, 4, GL_FLOAT, GL_FALSE, 0, BUFFER_OFFSET((texcolor_array_limit * 5) * sizeof(GLfloat))); // 4 comp per vertex, 7500 quads x 4 = 30,000
+			glEnableVertexAttribArray(OTlocation);
+			glVertexAttribPointer(OTlocation, 4, GL_FLOAT, GL_FALSE, 0, BUFFER_OFFSET((texcolor_array_limit * 4) * sizeof(GLfloat))); // 4 comp per vertex, 7500 quads x 4 = 30,000
 
 			glBindTexture(GL_TEXTURE_CUBE_MAP, ENVtextureID);
 			glBindTexture(GL_TEXTURE_2D, atlastextureID);
@@ -5718,6 +5565,7 @@ public:
 			case FL_PUSH:
 			{
 				ret = 1;
+				global_mouse_click = true;
 			}
 			case FL_RELEASE:            // keyboard key pushed
 			{
@@ -5779,6 +5627,14 @@ public:
 		lookZC = _lookZC;
 	}
 
+	void getCameras(coords3d& _cam, coords3d& _look, coords3d& _ZCcam, coords3d& _ZClook)
+	{
+		_cam = camera;
+		_look = look;
+		_ZCcam = cameraZC;
+		_ZClook = lookZC;
+	}
+
 	void FixViewport(int W, int H)
 	{
 		glLoadIdentity();
@@ -5806,9 +5662,49 @@ public:
 
 	void draw()
 	{
-
 		opengl_core();
 		render(camera, look, cameraZC, lookZC);
+	}
+
+	bool mouse_click()
+	{
+		bool mclick = global_mouse_click; // Mouse click expires on fetch here. (single use per frame)
+		global_mouse_click = false;
+		return mclick;
+	}
+
+	ipoint xymouse_screen() // We don't reference global_mouse here, because xymouse() will serve the OpenGL viewport dimensions for the Projection.
+	{
+		ipoint m = { 0,0 };
+
+		POINT p;
+		GetCursorPos(&p); // This is simple fetch of the whole screen mouse coordinates in isolation.
+		m = { p.x, p.y };
+
+		return m;
+	}
+
+	ipoint xymouse()
+	{
+		static bool firstTime = true;
+		ipoint m = { 0,0 };
+
+		if (firstTime)
+		{
+			hwnd_window = FindWindow(NULL, L"Arena");
+		}
+
+		if (hwnd_window != NULL)
+		{
+			GetCursorPos(&global_mouse);
+			ScreenToClient(hwnd_window, &global_mouse);
+			global_mouse.x = global_mouse.x - 5; // This is where the OpenGL context sits within the Arena window.
+			global_mouse.y = global_mouse.y - 75;
+
+			m = { global_mouse.x, global_mouse.y };
+		}
+
+		return m;
 	}
 
 	coords3d mouseDepth() // ReadPixel depth in 3D
@@ -5839,8 +5735,7 @@ public:
 		glDisableVertexAttribArray(RAlocation);
 		glDisableVertexAttribArray(SXlocation);
 		glDisableVertexAttribArray(TDlocation);
-		glDisableVertexAttribArray(MXlocation);
-		glDisableVertexAttribArray(TXlocation);
+		glDisableVertexAttribArray(OTlocation);
 
 		glDisableClientState(GL_VERTEX_ARRAY);
 		glDisableClientState(GL_NORMAL_ARRAY);

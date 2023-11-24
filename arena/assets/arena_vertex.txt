@@ -1,23 +1,22 @@
 #version 120
 
-// Bluebush 4.2 Main Vertex Shader
+// Bluebush 4.3 Main Vertex Shader
 
 attribute vec4 PA;	// Position / Alpha
 attribute vec4 RA;	// Rotation Quaternion
 attribute vec4 SX;	// Scale / Vector
-attribute vec4 TD;	// TexOffset / DisplacementOffset
-attribute vec4 MX;	// (MTmix, DisplacementMix) / MultiTex zoom / Midpoint of sample / MThalfExtents
-attribute vec4 TX;  // (Tmix), Tex zoom / Midpoint of sample / THalfExtents / Toffset (Automatic Texture Offsets)
+attribute vec4 TD;	// TexOffset / DisplacementOffset / DisplacementMix / blank
+attribute vec4 OT; // OTmix / OTMidpoint / OffsetZ,OTzoom / OThalfExtents
 
 varying vec4 Color;
 varying vec4 Tex_Fres;
 varying float Alpha;
 
+varying vec3 justNormal;
+
 varying vec4 vFrag; // Vertex
 varying vec4 eFrag; // Eye
 varying vec3 nFrag; // Normal
-
-varying vec3 ReflectDir; // Env Cube mapping
 
 varying float distToCamera;
 varying vec4 worldPosition;
@@ -29,23 +28,26 @@ varying vec2 displacementCoords;
 
 float atlasPixel = 1.0f / 2048.0f; // One pixel worth in atlas 0-1 format.
 
-// Unpack Multi-Texture attributes
-varying float mtMix;
-varying	vec2 MtHalfExtents;
-varying vec2 midpoint;
-varying vec2 top_left;
-varying vec2 ExtentPixels;
-varying float MtZoom;
-varying vec4 vert; // We can re-use vert for Auto Texture too.
+// Unpack Orthotex attributes
+varying float OTmix;
+varying float OTZoffset;
+varying float OTzoom;
+varying vec4 vert;
 
-// Unpack (auto) Texture attributes
-varying float tMix;
-varying	vec2 tHalfExtents;
-varying vec2 toffset;
-varying vec2 tmidpoint;
-varying vec2 ttop_left;
-varying vec2 tExtentPixels;
-varying float tZoom;
+varying vec2 OTmidP0;
+varying vec2 OTmidP1;
+varying vec2 OTmidP2;
+varying vec2 OTmidP3;
+varying vec2 OTmidP4;
+varying vec2 OTmidP5;
+varying vec2 OThalfExtents; // All parts are the same dimensions (px)
+varying vec2 OTextentPixels; // All parts are the same dimensions (Atlasy format)
+varying vec2 OTtopLeft0;
+varying vec2 OTtopLeft1;
+varying vec2 OTtopLeft2;
+varying vec2 OTtopLeft3;
+varying vec2 OTtopLeft4;
+varying vec2 OTtopLeft5;
 
 void main()
 {
@@ -71,7 +73,6 @@ void main()
 	rot_vert.z = dot(SX.yzw, rot_vert2.xyz);
 
 	vec4 FinalNormal2 = FinalNormal;
-
 	FinalNormal.x = dot(new_x, FinalNormal2.xyz);
 	FinalNormal.y = dot(new_y, FinalNormal2.xyz);
 	FinalNormal.z = dot(SX.yzw, FinalNormal2.xyz);
@@ -94,37 +95,49 @@ void main()
 	Tex_Fres.y = atlasPixel * floor(gl_MultiTexCoord0.x / 2048);
 	Tex_Fres.zw = gl_MultiTexCoord0.zw;	// and Fresnel and EnvMap ratio floats
 
-	displacementMix = floor(MX.x / 2048) * 0.01f;
-	displacementCoords.x = atlasPixel * mod(gl_MultiTexCoord0.y, 2048); // Location of displacementMap
-	displacementCoords.y = atlasPixel * floor(gl_MultiTexCoord0.y / 2048);
-
 	vFrag = gl_ModelViewMatrix * Finalprod;
 	eFrag = gl_ProjectionMatrixInverse * vec4(0,0,-1,0);
 	nFrag = normalize(gl_NormalMatrix * vec3(FinalNormal));
-
-	ReflectDir = normalize(reflect(Finalprod.xyz, FinalNormal.xyz));
+	
+	justNormal = gl_Normal;
 
 	// Distance to camera
 	distToCamera = gl_Position.w;
 
-	// Texture scrolling
-	texOffsets = vec4 (TD.x * atlasPixel, TD.y * atlasPixel, TD.z * atlasPixel, TD.w * atlasPixel);
+	texOffsets = vec4 (mod(TD.x, 2048) * atlasPixel, floor(TD.x / 2048) * atlasPixel, // Texture scrolling
+					   mod(TD.y, 2048) * atlasPixel, floor(TD.y / 2048) * atlasPixel); // Displacement offset
 	
-	// Unpack Multi-Texture attributes
-	mtMix = mod(MX.x, 2048) * 0.01f; // The * 0.01f converts it from 'int' to 0.0 to 1.0 value. // Multitexture mix ratio
-	MtHalfExtents = vec2(mod(MX.w, 2048) * atlasPixel, floor(MX.w / 2048) * atlasPixel); // Half-Extents in atlas format.
-	midpoint = vec2( mod(MX.z, 2048) * atlasPixel, floor(MX.z / 2048) * atlasPixel ); // Load midpoint px and convert to atlas 0-1 format.
-	top_left = vec2 ( midpoint.x - MtHalfExtents.x, midpoint.y - MtHalfExtents.y);
-	ExtentPixels = vec2(1.0f / (MtHalfExtents.x * 2.0f), 1.0f / (MtHalfExtents.y * 2.0f));
-	MtZoom = MX.y;
+	displacementMix = TD.z; // Just use the entire component.
+	displacementCoords.x = atlasPixel * mod(gl_MultiTexCoord0.y, 2048); // Location of displacementMap (from VBO texcoords)
+	displacementCoords.y = atlasPixel * floor(gl_MultiTexCoord0.y / 2048);
+		
+	// Unpack Orthotex attributes
+	
+	OTmix = OT.x; // OTmix is just the whole component
+	vec2 subimage_OTmidpoint = vec2( mod(OT.y, 2048), floor(OT.y / 2048) ); // Load absolute atlas midpoint in px
+	OTZoffset = mod(OT.z, 2048) * atlasPixel; // When this crosses the sign -/+ it jiggles the OTzoom a tiny fraction, this can be 'fixed' by offsetting into a higher positive number.
+	OTzoom = floor(OT.z / 2048);
+	vec2 subimage_OThalfExtents = vec2(mod(OT.w, 2048), floor(OT.w / 2048)); // Half-Extents in px. (whole six-part subimage)
+	vec2 subimage_OTtopLeft = vec2 ( subimage_OTmidpoint.x - subimage_OThalfExtents.x, subimage_OTmidpoint.y - subimage_OThalfExtents.y); // In px. (whole 6-part subimage)
+	
+	// Calculate the six texture samples
+	
+	float orthoMidpoint = subimage_OTtopLeft.x + (subimage_OThalfExtents.x / 6.0f);						
+	float orthoDelta = (subimage_OThalfExtents.x * 2.0f) / 6.0f;
+	
+	OTmidP0 = vec2( orthoMidpoint * atlasPixel, subimage_OTmidpoint.y * atlasPixel );
+	OTmidP1 = vec2( (orthoMidpoint + (orthoDelta * 1.0f)) * atlasPixel, subimage_OTmidpoint.y * atlasPixel );
+	OTmidP2 = vec2( (orthoMidpoint + (orthoDelta * 2.0f)) * atlasPixel, subimage_OTmidpoint.y * atlasPixel );
+	OTmidP3 = vec2( (orthoMidpoint + (orthoDelta * 3.0f)) * atlasPixel, subimage_OTmidpoint.y * atlasPixel );
+	OTmidP4 = vec2( (orthoMidpoint + (orthoDelta * 4.0f)) * atlasPixel, subimage_OTmidpoint.y * atlasPixel );
+	OTmidP5 = vec2( (orthoMidpoint + (orthoDelta * 5.0f)) * atlasPixel, subimage_OTmidpoint.y * atlasPixel );
+	OThalfExtents = vec2( (subimage_OThalfExtents.x / 6.0f) * atlasPixel, subimage_OThalfExtents.y * atlasPixel );
+	OTextentPixels = vec2( 1.0f / (OThalfExtents.x * 2.0f), 1.0f / (OThalfExtents.y * 2.0f) );
+	OTtopLeft0 = vec2(subimage_OTtopLeft.x * atlasPixel, subimage_OTtopLeft.y * atlasPixel); // convert to atlas format
+	OTtopLeft1 = vec2((subimage_OTtopLeft.x + (orthoDelta * 1.0f)) * atlasPixel, subimage_OTtopLeft.y * atlasPixel);
+	OTtopLeft2 = vec2((subimage_OTtopLeft.x + (orthoDelta * 2.0f)) * atlasPixel, subimage_OTtopLeft.y * atlasPixel);
+	OTtopLeft3 = vec2((subimage_OTtopLeft.x + (orthoDelta * 3.0f)) * atlasPixel, subimage_OTtopLeft.y * atlasPixel);
+	OTtopLeft4 = vec2((subimage_OTtopLeft.x + (orthoDelta * 4.0f)) * atlasPixel, subimage_OTtopLeft.y * atlasPixel);
+	OTtopLeft5 = vec2((subimage_OTtopLeft.x + (orthoDelta * 5.0f)) * atlasPixel, subimage_OTtopLeft.y * atlasPixel);
 	vert = gl_Vertex;
-
-	// Unpack (Auto) Texture attributes
-	tMix = mod(TX.x, 2048) * 0.01f; // The * 0.01f converts it from 'int' to 0.0 to 1.0 value.; // texture mix ratio
-	tHalfExtents = vec2(mod(TX.z, 2048) * atlasPixel, floor(TX.z / 2048) * atlasPixel); // Half-Extents in atlas format.
-	tmidpoint = vec2( mod(TX.y, 2048) * atlasPixel, floor(TX.y / 2048) * atlasPixel ); // Load midpoint px and convert to atlas 0-1 format.
-	toffset = vec2(mod(TX.w, 2048) * atlasPixel, floor(TX.w / 2048) * atlasPixel); // Automatic Texture offset
-	ttop_left = vec2 ( tmidpoint.x - tHalfExtents.x, tmidpoint.y - tHalfExtents.y);
-	tExtentPixels = vec2(1.0f / (tHalfExtents.x * 2.0f), 1.0f / (tHalfExtents.y * 2.0f));
-	tZoom = floor(TX.x / 2048);	
 }

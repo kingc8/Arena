@@ -1,6 +1,6 @@
 #version 120
 
-// Bluebush 4.2 Main Fragment Shader
+// Bluebush 4.3 Main Fragment Shader
 
 varying vec4 Color;
 varying vec4 Tex_Fres;
@@ -11,11 +11,11 @@ uniform float lightmix;
 uniform sampler2D tex0;
 uniform samplerCube env0;
 
+varying vec3 justNormal; // Plain normal
+
 varying vec4 vFrag; // Vertex
 varying vec4 eFrag; // Eye
 varying vec3 nFrag; // Normal
-
-varying vec3 ReflectDir; // Cube env mapping
 
 // Fresnel
 
@@ -32,21 +32,26 @@ varying vec4 texOffsets;
 varying float displacementMix;
 varying vec2 displacementCoords;
 
-varying float mtMix;
-varying	vec2 MtHalfExtents;
-varying vec2 midpoint;
-varying vec2 top_left;
-varying vec2 ExtentPixels;
-varying float MtZoom;
-varying vec4 vert; // Re-usable value.
+// Unpack Orthotex attributes
+varying float OTmix;
+varying float OTZoffset;
+varying float OTzoom;
+varying vec4 vert;
 
-varying float tMix;
-varying	vec2 tHalfExtents;
-varying vec2 toffset;
-varying vec2 tmidpoint;
-varying vec2 ttop_left;
-varying vec2 tExtentPixels;
-varying float tZoom;
+varying vec2 OTmidP0;
+varying vec2 OTmidP1;
+varying vec2 OTmidP2;
+varying vec2 OTmidP3;
+varying vec2 OTmidP4;
+varying vec2 OTmidP5;
+varying vec2 OThalfExtents; // All parts are the same dimensions (px)
+varying vec2 OTextentPixels; // All parts are the same dimensions (Atlasy format)
+varying vec2 OTtopLeft0;
+varying vec2 OTtopLeft1;
+varying vec2 OTtopLeft2;
+varying vec2 OTtopLeft3;
+varying vec2 OTtopLeft4;
+varying vec2 OTtopLeft5;
 
 float InQuint(float x)
 {
@@ -60,7 +65,6 @@ void main()
 	vec2 Tex = vec2(Tex_Fres.s + texOffsets.x, Tex_Fres.t + texOffsets.y);
 
 	vec4 displaceValue = texture2D ( tex0, vec2( displacementCoords.s + texOffsets.z, displacementCoords.t + texOffsets.w ) );
-
 	displaceValue.r = (displaceValue.r * displacementMix) * 0.00097;
 	Tex = vec2 ( Tex.s - displaceValue.r, Tex.t - displaceValue.r);
 
@@ -69,29 +73,76 @@ void main()
 
 	if ( texcolor.a > 0.0 ) // Only perform light above certain transparency level >= 0.6    > 0.01
 	{
-		// Multitexture integration
-		
+		// Orthotexture integration
+	
+		vec3 normNorm = normalize(justNormal);
 		float atlasPixel = 1.0f / 2048.0f; // One pixel worth in atlas 0-1 format.
-		vec2 v_px = vec2(vert.x * 0.01f, vert.y * 0.01f); // Vertex in Pixels position.
-		// Below, is the Atlas-sized midpoint + (Atlas-sized vertex_pixel * scale)
-		vec2 mtRaw = vec2 (midpoint.x + ((v_px.x * atlasPixel) * MtZoom), midpoint.y + ((v_px.y * atlasPixel) * MtZoom) ); // MX.y is zoom.
-		vec2 originRaw = vec2 ((mtRaw.x - midpoint.x), (mtRaw.y - midpoint.y));
-		vec2 wrap_ratio = vec2 ( fract ((originRaw.x * ExtentPixels.x) + 0.5f), fract ((originRaw.y * ExtentPixels.y) + 0.5f) );
-		vec2 mtCoords = vec2(top_left.x + ( wrap_ratio.x * (MtHalfExtents.x * 2.0f)), top_left.y + ( wrap_ratio.y * (MtHalfExtents.y * 2.0f)));
-		texcolor = mix ( texcolor, texture2D ( tex0, mtCoords ), mtMix);
+		vec2 v_px = vec2(vert.x * 0.01f, vert.y * 0.01f); // Vertex in Pixels position. Good for top and bottom.
+		vec2 tv_px = vec2(vert.x * 0.01f, vert.z * 0.01f); // Vertex in Pixels position (in X and Z this time). Good for front and back.
+		vec2 sv_px = vec2(vert.y * 0.01f, vert.z * 0.01f); // Vertex in Pixels position (in Y and Z this time). Good for left and right.
 
-		// Auto texture integration
+		// P0
 		
-		vec2 tv_px = vec2(vert.x * 0.01f, vert.z * 0.01f); // Vertex in Pixels position (in X and Z this time).
-		vec2 tRaw = vec2 (toffset.x + tmidpoint.x + ((tv_px.x * atlasPixel) * tZoom), toffset.y + tmidpoint.y + ((tv_px.y * atlasPixel) * tZoom) ); // TX.y is zoom.
-		vec2 ToriginRaw = vec2 ((tRaw.x - tmidpoint.x), (tRaw.y - tmidpoint.y));
-		vec2 twrap_ratio = vec2 ( fract ((ToriginRaw.x * tExtentPixels.x) + 0.5f), fract ((ToriginRaw.y * tExtentPixels.y) + 0.5f) );
-		vec2 tCoords = vec2(ttop_left.x + ( twrap_ratio.x * (tHalfExtents.x * 2.0f)),ttop_left.y + ( twrap_ratio.y * (tHalfExtents.y * 2.0f)));
-		texcolor = mix ( texcolor, texture2D ( tex0, tCoords ), tMix);
+		vec2 OTraw = vec2 (OTmidP0.x + ((sv_px.x * atlasPixel) * OTzoom), OTZoffset + OTmidP0.y + ((sv_px.y * atlasPixel) * OTzoom) );
+		vec2 OToriginRaw = vec2 ((OTraw.x - OTmidP0.x), (OTraw.y - OTmidP0.y));
+		vec2 OTwrapRatio = vec2 ( fract ((OToriginRaw.x * OTextentPixels.x) + 0.5f), fract ((OToriginRaw.y * OTextentPixels.y) + 0.5f) );
+		vec2 OTCoords = vec2(OTtopLeft0.x + ( OTwrapRatio.x * (OThalfExtents.x * 2.0f)), OTtopLeft0.y + ( OTwrapRatio.y * (OThalfExtents.y * 2.0f)));
+		float value = max(0.0, dot(normNorm, vec3(1.0, 0.0, 0.0))); // Blend by vector
+		texcolor = mix ( texcolor, texture2D ( tex0, OTCoords ), value * OTmix);
+
+		// P1
+		
+		OTraw = vec2 (OTmidP1.x + ((-tv_px.x * atlasPixel) * OTzoom), OTZoffset + OTmidP1.y + ((tv_px.y * atlasPixel) * OTzoom) );
+		OToriginRaw = vec2 ((OTraw.x - OTmidP1.x), (OTraw.y - OTmidP1.y));
+		OTwrapRatio = vec2 ( fract ((OToriginRaw.x * OTextentPixels.x) + 0.5f), fract ((OToriginRaw.y * OTextentPixels.y) + 0.5f) );
+		OTCoords = vec2(OTtopLeft1.x + ( OTwrapRatio.x * (OThalfExtents.x * 2.0f)), OTtopLeft1.y + ( OTwrapRatio.y * (OThalfExtents.y * 2.0f)));
+		value = max(0.0, dot(normNorm, vec3(0.0, 1.0, 0.0))); // Blend by vector
+		texcolor = mix ( texcolor, texture2D ( tex0, OTCoords ), value * OTmix);
+		
+		// P2
+		
+		OTraw = vec2 (OTmidP2.x + ((v_px.x * atlasPixel) * OTzoom), OTmidP2.y + ((v_px.y * atlasPixel) * OTzoom) );
+		OToriginRaw = vec2 ((OTraw.x - OTmidP2.x), (OTraw.y - OTmidP2.y));
+		OTwrapRatio = vec2 ( fract ((OToriginRaw.x * OTextentPixels.x) + 0.5f), fract ((OToriginRaw.y * OTextentPixels.y) + 0.5f) );
+		OTCoords = vec2(OTtopLeft2.x + ( OTwrapRatio.x * (OThalfExtents.x * 2.0f)), OTtopLeft2.y + ( OTwrapRatio.y * (OThalfExtents.y * 2.0f)));
+		value = max(0.0, dot(normNorm, vec3(0.0, 0.0, 1.0))); // Blend by vector
+		texcolor = mix ( texcolor, texture2D ( tex0, OTCoords ), value * OTmix);
+		
+		// P3
+		
+		OTraw = vec2 (OTmidP3.x + ((-sv_px.x * atlasPixel) * OTzoom), OTZoffset + OTmidP3.y + ((sv_px.y * atlasPixel) * OTzoom) );
+		OToriginRaw = vec2 ((OTraw.x - OTmidP3.x), (OTraw.y - OTmidP3.y));
+		OTwrapRatio = vec2 ( fract ((OToriginRaw.x * OTextentPixels.x) + 0.5f), fract ((OToriginRaw.y * OTextentPixels.y) + 0.5f) );
+		OTCoords = vec2(OTtopLeft3.x + ( OTwrapRatio.x * (OThalfExtents.x * 2.0f)), OTtopLeft3.y + ( OTwrapRatio.y * (OThalfExtents.y * 2.0f)));
+		value = max(0.0, dot(normNorm, vec3(-1.0, 0.0, 0.0))); // Blend by vector
+		texcolor = mix ( texcolor, texture2D ( tex0, OTCoords ), value * OTmix);
+
+		// P4
+		
+		OTraw = vec2 (OTmidP4.x + ((tv_px.x * atlasPixel) * OTzoom), OTZoffset + OTmidP4.y + ((tv_px.y * atlasPixel) * OTzoom) );
+		OToriginRaw = vec2 ((OTraw.x - OTmidP4.x), (OTraw.y - OTmidP4.y));
+		OTwrapRatio = vec2 ( fract ((OToriginRaw.x * OTextentPixels.x) + 0.5f), fract ((OToriginRaw.y * OTextentPixels.y) + 0.5f) );
+		OTCoords = vec2(OTtopLeft4.x + ( OTwrapRatio.x * (OThalfExtents.x * 2.0f)), OTtopLeft4.y + ( OTwrapRatio.y * (OThalfExtents.y * 2.0f)));
+		value = max(0.0, dot(normNorm, vec3(0.0, -1.0, 0.0))); // Blend by vector
+		texcolor = mix ( texcolor, texture2D ( tex0, OTCoords ), value * OTmix);
+		
+		// P5
+		
+		OTraw = vec2 (OTmidP5.x + ((v_px.x * atlasPixel) * OTzoom), OTmidP5.y + ((-v_px.y * atlasPixel) * OTzoom) );
+		OToriginRaw = vec2 ((OTraw.x - OTmidP5.x), (OTraw.y - OTmidP5.y));
+		OTwrapRatio = vec2 ( fract ((OToriginRaw.x * OTextentPixels.x) + 0.5f), fract ((OToriginRaw.y * OTextentPixels.y) + 0.5f) );
+		OTCoords = vec2(OTtopLeft5.x + ( OTwrapRatio.x * (OThalfExtents.x * 2.0f)), OTtopLeft5.y + ( OTwrapRatio.y * (OThalfExtents.y * 2.0f)));
+		value = max(0.0, dot(normNorm, vec3(0.0, 0.0, -1.0))); // Blend by vector
+		texcolor = mix ( texcolor, texture2D ( tex0, OTCoords ), value * OTmix);
 
 		// Cube map environment map.
 
-		vec4 envColor = vec4(textureCube(env0, ReflectDir));
+		vec3 CameraPosition = vec3(gl_ModelViewMatrix[3]);
+		CameraPosition = -CameraPosition; // Invert the translation.
+		vec3 Reflection = reflect(vFrag.xyz - CameraPosition, normalize(nFrag));
+		vec3 ReflectDir = vec3(Reflection.x, -Reflection.yz);
+
+		vec4 envColor = textureCube(env0, normalize(ReflectDir));
 		texcolor = mix(texcolor, envColor, Tex_Fres.q ); // 0.5 is the MixRatio
 		
 		// Lighting
@@ -109,8 +160,6 @@ void main()
 		// calculate Specular Term:
 		vec4 Ispec = gl_FrontLightProduct[0].specular * pow(max(dot(R,E),0.0),0.3*gl_FrontMaterial.shininess);
 
-		// DEBUG this below was simply texcolor assignment
-
 		texcolor.a = finalAlpha;
 		vec4 texcolor_light = (texcolor * gl_FrontLightModelProduct.sceneColor) + Iamb + Idiff + Ispec;
 		texcolor_light.a = finalAlpha;
@@ -124,11 +173,21 @@ void main()
 //	float fade = 0.0;	
 //	float fade =  InQuint(clamp((dist * 0.03) / 1.0f, 0.0f, 0.90f)); // 0.7
 	float fade = lightmix * (clamp((dist * 0.01) / 1.0f, 0.0f, 0.90f)); // 0.7
+
+	if (worldPosition.y < -51) // Brightness outside.
+		fade = 0.2f;
+
 	texcolor = vec4(texcolor.r - (texcolor.r * fade), texcolor.g - (texcolor.g * fade), texcolor.b - (texcolor.b * fade), texcolor.a);
 
 	// Fade pixel closer to camera (bluebush to opengl = value * 0.01;)
 	//texcolor.a = texcolor.a * clamp((distToCamera * 0.01) / 1.0f, 0.0f, 1.0f);
 
+	// vector experiment with possible orthoTextures
+	//vec3 normNorm = normalize(justNormal);
+	//float value = max(0.0, dot(normNorm, vec3(0.0, 0.0, -1.0)));	
+
 	// write Total Color:
 	gl_FragColor = texcolor;
+	
+	//gl_FragColor = vec4(value, value, value, 1.0);
 }

@@ -4,7 +4,7 @@
         <key>fileFormatVersion</key>
         <int>6</int>
         <key>texturePackerVersion</key>
-        <string>7.0.2</string>
+        <string>7.1.0</string>
         <key>autoSDSettings</key>
         <array>
             <struct type="AutoSDSettings">
@@ -173,6 +173,34 @@
         </struct>
         <key>individualSpriteSettings</key>
         <map type="IndividualSpriteSettingsMap">
+            <key type="filename">beige0.png</key>
+            <key type="filename">black0.png</key>
+            <key type="filename">blue0.png</key>
+            <key type="filename">brown0.png</key>
+            <key type="filename">gray0.png</key>
+            <key type="filename">green0.png</key>
+            <key type="filename">orange1.png</key>
+            <key type="filename">red0.png</key>
+            <key type="filename">seagreen0.png</key>
+            <key type="filename">turquoise0.png</key>
+            <key type="filename">violet0.png</key>
+            <key type="filename">violet1.png</key>
+            <key type="filename">white1.png</key>
+            <key type="filename">yellow0.png</key>
+            <struct type="IndividualSpriteSettings">
+                <key>pivotPoint</key>
+                <point_f>0.5,0.5</point_f>
+                <key>spriteScale</key>
+                <double>1</double>
+                <key>scale9Enabled</key>
+                <false/>
+                <key>scale9Borders</key>
+                <rect>2,2,4,4</rect>
+                <key>scale9Paddings</key>
+                <rect>2,2,4,4</rect>
+                <key>scale9FromFile</key>
+                <false/>
+            </struct>
             <key type="filename">blank.png</key>
             <struct type="IndividualSpriteSettings">
                 <key>pivotPoint</key>
@@ -284,7 +312,7 @@
                 <key>scale9FromFile</key>
                 <false/>
             </struct>
-            <key type="filename">elevation.png</key>
+            <key type="filename">door.png</key>
             <struct type="IndividualSpriteSettings">
                 <key>pivotPoint</key>
                 <point_f>0.5,0.5</point_f>
@@ -293,39 +321,9 @@
                 <key>scale9Enabled</key>
                 <false/>
                 <key>scale9Borders</key>
-                <rect>32,8,64,16</rect>
+                <rect>124,226,248,451</rect>
                 <key>scale9Paddings</key>
-                <rect>32,8,64,16</rect>
-                <key>scale9FromFile</key>
-                <false/>
-            </struct>
-            <key type="filename">fireplace_bricks.png</key>
-            <struct type="IndividualSpriteSettings">
-                <key>pivotPoint</key>
-                <point_f>0.5,0.5</point_f>
-                <key>spriteScale</key>
-                <double>1</double>
-                <key>scale9Enabled</key>
-                <false/>
-                <key>scale9Borders</key>
-                <rect>64,59,128,119</rect>
-                <key>scale9Paddings</key>
-                <rect>64,59,128,119</rect>
-                <key>scale9FromFile</key>
-                <false/>
-            </struct>
-            <key type="filename">flame.png</key>
-            <struct type="IndividualSpriteSettings">
-                <key>pivotPoint</key>
-                <point_f>0.5,0.5</point_f>
-                <key>spriteScale</key>
-                <double>1</double>
-                <key>scale9Enabled</key>
-                <false/>
-                <key>scale9Borders</key>
-                <rect>64,48,128,95</rect>
-                <key>scale9Paddings</key>
-                <rect>64,48,128,95</rect>
+                <rect>124,226,248,451</rect>
                 <key>scale9FromFile</key>
                 <false/>
             </struct>
@@ -406,6 +404,27 @@
                 <key>scale9FromFile</key>
                 <false/>
             </struct>
+            <key type="filename">graybar0.png</key>
+            <key type="filename">orange0.png</key>
+            <key type="filename">railbar.png</key>
+            <key type="filename">railbar1.png</key>
+            <key type="filename">railbar2.png</key>
+            <key type="filename">railbar3.png</key>
+            <key type="filename">redgradient0.png</key>
+            <struct type="IndividualSpriteSettings">
+                <key>pivotPoint</key>
+                <point_f>0.5,0.5</point_f>
+                <key>spriteScale</key>
+                <double>1</double>
+                <key>scale9Enabled</key>
+                <false/>
+                <key>scale9Borders</key>
+                <rect>4,4,8,8</rect>
+                <key>scale9Paddings</key>
+                <rect>4,4,8,8</rect>
+                <key>scale9FromFile</key>
+                <false/>
+            </struct>
             <key type="filename">lampShade.png</key>
             <struct type="IndividualSpriteSettings">
                 <key>pivotPoint</key>
@@ -452,7 +471,7 @@
                 <key>scale9FromFile</key>
                 <false/>
             </struct>
-            <key type="filename">orange0.png</key>
+            <key type="filename">orthoTest.png</key>
             <struct type="IndividualSpriteSettings">
                 <key>pivotPoint</key>
                 <point_f>0.5,0.5</point_f>
@@ -461,13 +480,13 @@
                 <key>scale9Enabled</key>
                 <false/>
                 <key>scale9Borders</key>
-                <rect>4,4,8,8</rect>
+                <rect>182,30,363,61</rect>
                 <key>scale9Paddings</key>
-                <rect>4,4,8,8</rect>
+                <rect>182,30,363,61</rect>
                 <key>scale9FromFile</key>
                 <false/>
             </struct>
-            <key type="filename">pillars.png</key>
+            <key type="filename">outside.png</key>
             <struct type="IndividualSpriteSettings">
                 <key>pivotPoint</key>
                 <point_f>0.5,0.5</point_f>
@@ -476,9 +495,70 @@
                 <key>scale9Enabled</key>
                 <false/>
                 <key>scale9Borders</key>
-                <rect>128,49,256,98</rect>
+                <rect>80,89,160,178</rect>
                 <key>scale9Paddings</key>
-                <rect>128,49,256,98</rect>
+                <rect>80,89,160,178</rect>
+                <key>scale9FromFile</key>
+                <false/>
+            </struct>
+            <key type="filename">pineBark0.png</key>
+            <struct type="IndividualSpriteSettings">
+                <key>pivotPoint</key>
+                <point_f>0.5,0.5</point_f>
+                <key>spriteScale</key>
+                <double>1</double>
+                <key>scale9Enabled</key>
+                <false/>
+                <key>scale9Borders</key>
+                <rect>10,33,19,66</rect>
+                <key>scale9Paddings</key>
+                <rect>10,33,19,66</rect>
+                <key>scale9FromFile</key>
+                <false/>
+            </struct>
+            <key type="filename">pineTex0.png</key>
+            <key type="filename">pineTex1.png</key>
+            <struct type="IndividualSpriteSettings">
+                <key>pivotPoint</key>
+                <point_f>0.5,0.5</point_f>
+                <key>spriteScale</key>
+                <double>1</double>
+                <key>scale9Enabled</key>
+                <false/>
+                <key>scale9Borders</key>
+                <rect>19,33,37,65</rect>
+                <key>scale9Paddings</key>
+                <rect>19,33,37,65</rect>
+                <key>scale9FromFile</key>
+                <false/>
+            </struct>
+            <key type="filename">pineTex2.png</key>
+            <struct type="IndividualSpriteSettings">
+                <key>pivotPoint</key>
+                <point_f>0.5,0.5</point_f>
+                <key>spriteScale</key>
+                <double>1</double>
+                <key>scale9Enabled</key>
+                <false/>
+                <key>scale9Borders</key>
+                <rect>31,35,61,69</rect>
+                <key>scale9Paddings</key>
+                <rect>31,35,61,69</rect>
+                <key>scale9FromFile</key>
+                <false/>
+            </struct>
+            <key type="filename">pineTex3.png</key>
+            <struct type="IndividualSpriteSettings">
+                <key>pivotPoint</key>
+                <point_f>0.5,0.5</point_f>
+                <key>spriteScale</key>
+                <double>1</double>
+                <key>scale9Enabled</key>
+                <false/>
+                <key>scale9Borders</key>
+                <rect>28,29,56,57</rect>
+                <key>scale9Paddings</key>
+                <rect>28,29,56,57</rect>
                 <key>scale9FromFile</key>
                 <false/>
             </struct>
@@ -512,21 +592,6 @@
                 <key>scale9FromFile</key>
                 <false/>
             </struct>
-            <key type="filename">superTree.png</key>
-            <struct type="IndividualSpriteSettings">
-                <key>pivotPoint</key>
-                <point_f>0.5,0.5</point_f>
-                <key>spriteScale</key>
-                <double>1</double>
-                <key>scale9Enabled</key>
-                <false/>
-                <key>scale9Borders</key>
-                <rect>88,92,175,185</rect>
-                <key>scale9Paddings</key>
-                <rect>88,92,175,185</rect>
-                <key>scale9FromFile</key>
-                <false/>
-            </struct>
             <key type="filename">textPlate0.png</key>
             <struct type="IndividualSpriteSettings">
                 <key>pivotPoint</key>
@@ -539,24 +604,6 @@
                 <rect>64,8,128,16</rect>
                 <key>scale9Paddings</key>
                 <rect>64,8,128,16</rect>
-                <key>scale9FromFile</key>
-                <false/>
-            </struct>
-            <key type="filename">tree0.png</key>
-            <key type="filename">tree1.png</key>
-            <key type="filename">tree2.png</key>
-            <key type="filename">tree3.png</key>
-            <struct type="IndividualSpriteSettings">
-                <key>pivotPoint</key>
-                <point_f>0.5,0.5</point_f>
-                <key>spriteScale</key>
-                <double>1</double>
-                <key>scale9Enabled</key>
-                <false/>
-                <key>scale9Borders</key>
-                <rect>64,75,128,151</rect>
-                <key>scale9Paddings</key>
-                <rect>64,75,128,151</rect>
                 <key>scale9FromFile</key>
                 <false/>
             </struct>
@@ -622,21 +669,6 @@
                 <key>scale9FromFile</key>
                 <false/>
             </struct>
-            <key type="filename">zombie.png</key>
-            <struct type="IndividualSpriteSettings">
-                <key>pivotPoint</key>
-                <point_f>0.5,0.5</point_f>
-                <key>spriteScale</key>
-                <double>1</double>
-                <key>scale9Enabled</key>
-                <false/>
-                <key>scale9Borders</key>
-                <rect>132,203,264,405</rect>
-                <key>scale9Paddings</key>
-                <rect>132,203,264,405</rect>
-                <key>scale9FromFile</key>
-                <false/>
-            </struct>
         </map>
         <key>fileLists</key>
         <map type="SpriteSheetMap">
@@ -675,33 +707,51 @@
                     <filename>icon_waterwell.png</filename>
                     <filename>carpet.png</filename>
                     <filename>floorboards.png</filename>
-                    <filename>elevation.png</filename>
                     <filename>icon_demolish.png</filename>
                     <filename>blank.png</filename>
                     <filename>shipPainting.png</filename>
-                    <filename>pillars.png</filename>
                     <filename>cupboard.png</filename>
                     <filename>wall.png</filename>
                     <filename>lampShade.png</filename>
                     <filename>book.png</filename>
                     <filename>brick.png</filename>
-                    <filename>fireplace_bricks.png</filename>
                     <filename>freshWood.png</filename>
                     <filename>freshWoodv.png</filename>
                     <filename>shadow.png</filename>
-                    <filename>tree0.png</filename>
-                    <filename>tree1.png</filename>
                     <filename>flameDisplacement.png</filename>
-                    <filename>flame.png</filename>
-                    <filename>tree2.png</filename>
-                    <filename>tree3.png</filename>
-                    <filename>zombie.png</filename>
                     <filename>mouse_blocked.png</filename>
-                    <filename>superTree.png</filename>
                     <filename>wood0016.png</filename>
                     <filename>wood0017.png</filename>
                     <filename>wood0018.png</filename>
                     <filename>checker.png</filename>
+                    <filename>orthoTest.png</filename>
+                    <filename>beige0.png</filename>
+                    <filename>black0.png</filename>
+                    <filename>blue0.png</filename>
+                    <filename>gray0.png</filename>
+                    <filename>graybar0.png</filename>
+                    <filename>green0.png</filename>
+                    <filename>orange1.png</filename>
+                    <filename>railbar.png</filename>
+                    <filename>railbar1.png</filename>
+                    <filename>railbar2.png</filename>
+                    <filename>railbar3.png</filename>
+                    <filename>red0.png</filename>
+                    <filename>redgradient0.png</filename>
+                    <filename>seagreen0.png</filename>
+                    <filename>turquoise0.png</filename>
+                    <filename>violet0.png</filename>
+                    <filename>violet1.png</filename>
+                    <filename>yellow0.png</filename>
+                    <filename>brown0.png</filename>
+                    <filename>white1.png</filename>
+                    <filename>pineBark0.png</filename>
+                    <filename>pineTex0.png</filename>
+                    <filename>pineTex1.png</filename>
+                    <filename>pineTex2.png</filename>
+                    <filename>pineTex3.png</filename>
+                    <filename>outside.png</filename>
+                    <filename>door.png</filename>
                 </array>
             </struct>
         </map>
